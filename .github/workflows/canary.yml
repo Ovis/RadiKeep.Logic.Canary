@@ -26,14 +26,6 @@ on:
         description: "Timefree record seconds"
         required: false
         default: "30"
-      radiru_ondemand_record_seconds:
-        description: "Radiru on-demand record seconds"
-        required: false
-        default: "30"
-      min_output_bytes:
-        description: "Minimum output file size in bytes"
-        required: false
-        default: "32768"
 
 permissions:
   contents: read
@@ -49,8 +41,6 @@ jobs:
       RADIRU_STATION_ID: ${{ github.event.inputs.radiru_station_id || 'r1' }}
       REALTIME_RECORD_SECONDS: ${{ github.event.inputs.realtime_record_seconds || '30' }}
       TIMEFREE_RECORD_SECONDS: ${{ github.event.inputs.timefree_record_seconds || '30' }}
-      RADIRU_ONDEMAND_RECORD_SECONDS: ${{ github.event.inputs.radiru_ondemand_record_seconds || '30' }}
-      MIN_OUTPUT_BYTES: ${{ github.event.inputs.min_output_bytes || '32768' }}
       RADIKO_USER_ID: ${{ secrets.RADIKO_USER_ID }}
       RADIKO_PASSWORD: ${{ secrets.RADIKO_PASSWORD }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -83,8 +73,6 @@ jobs:
             --radiru-station-id "${RADIRU_STATION_ID}" \
             --realtime-record-seconds "${REALTIME_RECORD_SECONDS}" \
             --timefree-record-seconds "${TIMEFREE_RECORD_SECONDS}" \
-            --radiru-ondemand-record-seconds "${RADIRU_ONDEMAND_RECORD_SECONDS}" \
-            --min-output-bytes "${MIN_OUTPUT_BYTES}" \
             --status-json "results/status.json" \
             --log-dir "logs" \
             --record-output-dir "artifacts/recordings"

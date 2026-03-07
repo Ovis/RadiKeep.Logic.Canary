@@ -113,17 +113,31 @@ try
         Path.Combine(logDir, "C005_RADIRU_ONDEMAND_RECORD.log"));
     checks.Add(c005RadiruOnDemand);
 
-    var overall = checks.All(c => c.Result == "PASS") ? "PASS" : "FAIL";
+    var overall = checks.Any(c => c.Result == "FAIL")
+        ? "FAIL"
+        : checks.Any(c => c.Result == "WARN")
+            ? "WARN"
+            : "PASS";
     var summary = new CanaryStatus
     {
         Result = overall,
-        Message = overall == "PASS" ? "Bootstrap checks passed." : "One or more bootstrap checks failed.",
+        Message = overall switch
+        {
+            "PASS" => "Bootstrap checks passed.",
+            "WARN" => "Canary completed with warnings.",
+            _ => "One or more bootstrap checks failed."
+        },
         TimestampJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone()).ToString("O"),
         Checks = checks
     };
 
     await WriteStatusAsync(statusPath, summary);
-    return overall == "PASS" ? 0 : 2;
+    return overall switch
+    {
+        "PASS" => 0,
+        "WARN" => 1,
+        _ => 2
+    };
 }
 catch (Exception ex)
 {
@@ -217,7 +231,7 @@ static async Task<CheckResult> CheckRadikoDailyFetchAsync(LogicContext logicCont
     {
         log.AppendLine(ex.ToString());
         await File.WriteAllTextAsync(logPath, log.ToString());
-        return new CheckResult("C001_RADIKO_DAILY_FETCH", "FAIL", $"Failed to fetch radiko daily programs: {ex.Message}", "E-C001-NETWORK");
+        return CreateFailureResult("C001_RADIKO_DAILY_FETCH", "E-C001-NETWORK", $"Failed to fetch radiko daily programs: {ex.Message}", ex);
     }
 }
 
@@ -275,7 +289,7 @@ static async Task<CheckResult> CheckRadiruDailyFetchAsync(
     {
         log.AppendLine(ex.ToString());
         await File.WriteAllTextAsync(logPath, log.ToString());
-        return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", $"Failed to fetch radiru daily programs: {ex.Message}", "E-C002-NETWORK");
+        return CreateFailureResult("C002_RADIRU_DAILY_FETCH", "E-C002-NETWORK", $"Failed to fetch radiru daily programs: {ex.Message}", ex);
     }
 }
 
@@ -613,14 +627,14 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
         if (!login.IsSuccess || string.IsNullOrWhiteSpace(login.Session))
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko login failed.", "E-C003-RADIKO-LOGIN");
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko login failed.", "E-C003-RECORD-EXEC");
         }
 
         var areaResult = await logicContext.RadikoLogic.GetRadikoAreaAsync(forceRefresh: true);
         if (!areaResult.IsSuccess || string.IsNullOrWhiteSpace(areaResult.Area))
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko area detection failed.", "E-C003-RADIKO-AREA");
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko area detection failed.", "E-C003-RECORD-EXEC");
         }
         var area = areaResult.Area;
 
@@ -628,7 +642,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
         if (currentAreaStations.Count == 0)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "No stations resolved for current area.", "E-C003-RADIKO-STATIONS");
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "No stations resolved for current area.", "E-C003-RECORD-EXEC");
         }
 
         var stationId = preferredStationId;
@@ -655,7 +669,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
         if (onAirProgram is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "No on-air program found for realtime record.", "E-C003-RADIKO-NO-ONAIR");
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "No on-air program found for realtime record.", "E-C003-NO-ONAIR");
         }
 
         var seededProgramId = await SeedRadikoProgramForRealtimeRecordingAsync(logicContext, stationId, onAirProgram.Value.Title, area, recordSeconds);
@@ -685,17 +699,23 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
         log.AppendLine($"output={outputPath}");
         log.AppendLine($"logic_recorded={recorded}");
 
-        if (!recorded || !File.Exists(outputPath))
+        if (!recorded)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko realtime recording failed.", "E-C003-RADIKO-RECORD");
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko realtime recording failed.", "E-C003-RECORD-EXEC");
+        }
+
+        if (!File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "Recorded file was not found.", "E-C003-OUTPUT-MISSING");
         }
 
         var bytes = new FileInfo(outputPath).Length;
         if (bytes < 32 * 1024)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C003-RADIKO-SIZE");
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C003-OUTPUT-TOO-SMALL");
         }
 
         await File.WriteAllTextAsync(logPath, log.ToString());
@@ -705,7 +725,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
     {
         log.AppendLine(ex.ToString());
         await File.WriteAllTextAsync(logPath, log.ToString());
-        return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", $"radiko realtime check failed: {ex.Message}", "E-C003-RADIKO-EXCEPTION");
+        return CreateFailureResult("C003_RADIKO_REALTIME_RECORD", "E-C003-RECORD-EXEC", $"radiko realtime check failed: {ex.Message}", ex);
     }
 }
 
@@ -725,14 +745,14 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
         if (!login.IsSuccess || string.IsNullOrWhiteSpace(login.Session))
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko login failed.", "E-C004-RADIKO-LOGIN");
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko login failed.", "E-C004-AUTH");
         }
 
         var areaResult = await logicContext.RadikoLogic.GetRadikoAreaAsync(forceRefresh: true);
         if (!areaResult.IsSuccess || string.IsNullOrWhiteSpace(areaResult.Area))
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko area detection failed.", "E-C004-RADIKO-AREA");
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko area detection failed.", "E-C004-AUTH");
         }
         var area = areaResult.Area;
 
@@ -740,7 +760,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
         if (currentAreaStations.Count == 0)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "No stations resolved for current area.", "E-C004-RADIKO-STATIONS");
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "No stations resolved for current area.", "E-C004-AUTH");
         }
 
         var stationId = preferredStationId;
@@ -767,7 +787,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
         if (candidate is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "No timefree candidate program found.", "E-C004-RADIKO-NO-CANDIDATE");
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "No timefree candidate program found.", "E-C004-NO-TIMEFREE-CANDIDATE");
         }
 
         var seededProgramId = await SeedRadikoProgramForTimeFreeRecordingAsync(
@@ -806,17 +826,23 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
         log.AppendLine($"output={outputPath}");
         log.AppendLine($"logic_recorded={recorded}");
 
-        if (!recorded || !File.Exists(outputPath))
+        if (!recorded)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko timefree recording failed.", "E-C004-RADIKO-RECORD");
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko timefree recording failed.", "E-C004-RECORD-EXEC");
+        }
+
+        if (!File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "Recorded file was not found.", "E-C004-OUTPUT-MISSING");
         }
 
         var bytes = new FileInfo(outputPath).Length;
         if (bytes < 32 * 1024)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C004-RADIKO-SIZE");
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C004-OUTPUT-TOO-SMALL");
         }
 
         await File.WriteAllTextAsync(logPath, log.ToString());
@@ -826,7 +852,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
     {
         log.AppendLine(ex.ToString());
         await File.WriteAllTextAsync(logPath, log.ToString());
-        return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", $"radiko timefree check failed: {ex.Message}", "E-C004-RADIKO-EXCEPTION");
+        return CreateFailureResult("C004_RADIKO_TIMEFREE_RECORD", "E-C004-RECORD-EXEC", $"radiko timefree check failed: {ex.Message}", ex);
     }
 }
 
@@ -850,7 +876,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
         if (stationKind is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru station kind not found.", "E-C003-RADIRU-STATION");
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru station kind not found.", "E-C003-RECORD-EXEC");
         }
 
         await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
@@ -861,7 +887,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
         if (onAirProgram is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "No on-air radiru program found.", "E-C003-RADIRU-NO-ONAIR");
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "No on-air radiru program found.", "E-C003-NO-ONAIR");
         }
 
         var seededProgramId = await SeedRadiruProgramForRealtimeRecordingAsync(logicContext, normalizedArea, stationKind!, onAirProgram, recordSeconds);
@@ -887,17 +913,23 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
         log.AppendLine($"output={outputPath}");
         log.AppendLine($"logic_recorded={recorded}");
 
-        if (!recorded || !File.Exists(outputPath))
+        if (!recorded)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru realtime recording failed.", "E-C003-RADIRU-RECORD");
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru realtime recording failed.", "E-C003-RECORD-EXEC");
+        }
+
+        if (!File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Recorded file was not found.", "E-C003-OUTPUT-MISSING");
         }
 
         var bytes = new FileInfo(outputPath).Length;
         if (bytes < 32 * 1024)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C003-RADIRU-SIZE");
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C003-OUTPUT-TOO-SMALL");
         }
 
         await File.WriteAllTextAsync(logPath, log.ToString());
@@ -907,7 +939,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
     {
         log.AppendLine(ex.ToString());
         await File.WriteAllTextAsync(logPath, log.ToString());
-        return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", $"Radiru realtime check failed: {ex.Message}", "E-C003-RADIRU-EXCEPTION");
+        return CreateFailureResult("C003_RADIRU_REALTIME_RECORD", "E-C003-RECORD-EXEC", $"Radiru realtime check failed: {ex.Message}", ex);
     }
 }
 
@@ -930,30 +962,36 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
         if (stationKind is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Radiru station kind not found.", "E-C005-RADIRU-STATION");
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Radiru station kind not found.", "E-C005-RECORD-EXEC");
         }
 
         await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
 
         var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
-        var candidate = await FindRadiruOnDemandCandidateAsync(logicContext, areaKind, stationKind, now);
-        if (candidate is null)
+        var selection = await FindRadiruOnDemandCandidateAsync(logicContext, areaKind, stationKind, now);
+        if (selection.Candidate is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "No on-demand program candidate found.", "E-C005-RADIRU-NO-CANDIDATE");
+            return new CheckResult(
+                "C005_RADIRU_ONDEMAND_RECORD",
+                "FAIL",
+                selection.HasExpiredCandidate ? "On-demand candidates exist but all are expired." : "No on-demand program candidate found.",
+                selection.HasExpiredCandidate ? "E-C005-EXPIRED" : "E-C005-NO-ONDEMAND-CANDIDATE");
         }
+
+        var candidate = selection.Candidate!;
 
         var seededProgramId = await SeedRadiruProgramForOnDemandRecordingAsync(
             logicContext,
             normalizedArea,
             stationKind,
-            candidate.Value.Program,
-            candidate.Value.OnDemandUrl,
-            candidate.Value.ExpiresAtUtc);
+            candidate.Program,
+            candidate.OnDemandUrl,
+            candidate.ExpiresAtUtc);
         var command = new RecordingCommand(
             RadioServiceKind.Radiru,
             seededProgramId,
-            candidate.Value.Program.Name,
+            candidate.Program.Name,
             IsTimeFree: false,
             StartDelaySeconds: 0,
             EndDelaySeconds: 0,
@@ -968,25 +1006,31 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
         var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
         var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
 
-        log.AppendLine($"ondemand_program={candidate.Value.Program.Name}");
-        log.AppendLine($"ondemand_program_start={candidate.Value.Program.StartDate:O}");
-        log.AppendLine($"ondemand_program_end={candidate.Value.Program.EndDate:O}");
-        log.AppendLine($"ondemand_expires_utc={candidate.Value.ExpiresAtUtc:O}");
+        log.AppendLine($"ondemand_program={candidate.Program.Name}");
+        log.AppendLine($"ondemand_program_start={candidate.Program.StartDate:O}");
+        log.AppendLine($"ondemand_program_end={candidate.Program.EndDate:O}");
+        log.AppendLine($"ondemand_expires_utc={candidate.ExpiresAtUtc:O}");
         log.AppendLine($"seed_program_id={seededProgramId}");
         log.AppendLine($"output={outputPath}");
         log.AppendLine($"logic_recorded={recorded}");
 
-        if (!recorded || !File.Exists(outputPath))
+        if (!recorded)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Radiru on-demand recording failed.", "E-C005-RADIRU-RECORD");
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Radiru on-demand recording failed.", "E-C005-RECORD-EXEC");
+        }
+
+        if (!File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Recorded file was not found.", "E-C005-OUTPUT-MISSING");
         }
 
         var bytes = new FileInfo(outputPath).Length;
         if (bytes < 32 * 1024)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C005-RADIRU-SIZE");
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C005-OUTPUT-TOO-SMALL");
         }
 
         await File.WriteAllTextAsync(logPath, log.ToString());
@@ -996,7 +1040,7 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
     {
         log.AppendLine(ex.ToString());
         await File.WriteAllTextAsync(logPath, log.ToString());
-        return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", $"Radiru on-demand check failed: {ex.Message}", "E-C005-RADIRU-EXCEPTION");
+        return CreateFailureResult("C005_RADIRU_ONDEMAND_RECORD", "E-C005-RECORD-EXEC", $"Radiru on-demand check failed: {ex.Message}", ex);
     }
 }
 
@@ -1053,7 +1097,7 @@ static async Task<(string ProgramId, string Title, DateTimeOffset StartTime, Dat
     return (candidate.Program.ProgramId, candidate.Program.Title, candidate.StartJst, candidate.EndJst);
 }
 
-static async Task<(RadiruProgramJsonEntity Program, string OnDemandUrl, DateTime ExpiresAtUtc)?> FindRadiruOnDemandCandidateAsync(
+static async Task<(RadiruOnDemandCandidate? Candidate, bool HasExpiredCandidate)> FindRadiruOnDemandCandidateAsync(
     LogicContext logicContext,
     RadiruAreaKind areaKind,
     RadiruStationKind stationKind,
@@ -1065,7 +1109,8 @@ static async Task<(RadiruProgramJsonEntity Program, string OnDemandUrl, DateTime
         nowJst.AddDays(-1)
     };
 
-    var candidates = new List<(RadiruProgramJsonEntity Program, string OnDemandUrl, DateTime ExpiresAtUtc)>();
+    var candidates = new List<RadiruOnDemandCandidate>();
+    var hasExpiredCandidate = false;
 
     foreach (var targetDate in targetDates)
     {
@@ -1093,22 +1138,24 @@ static async Task<(RadiruProgramJsonEntity Program, string OnDemandUrl, DateTime
                 : program.About.Audio.Expires.UtcDateTime;
             if (expiresAtUtc <= DateTime.UtcNow)
             {
+                hasExpiredCandidate = true;
                 continue;
             }
 
-            candidates.Add((program, onDemandUrl, expiresAtUtc));
+            candidates.Add(new RadiruOnDemandCandidate(program, onDemandUrl, expiresAtUtc));
         }
     }
 
     if (candidates.Count == 0)
     {
-        return null;
+        return (null, hasExpiredCandidate);
     }
 
-    return candidates
+    var candidate = candidates
         .OrderBy(x => x.Program.EndDate - x.Program.StartDate)
         .ThenByDescending(x => x.Program.EndDate)
         .First();
+    return (candidate, hasExpiredCandidate);
 }
 
 static string? SelectRadiruOnDemandContentUrl(RadiruProgramJsonEntity program)
@@ -1165,6 +1212,42 @@ static async Task WriteJsonLogAsync<T>(string path, T payload)
 {
     var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
     await File.WriteAllTextAsync(path, json);
+}
+
+static CheckResult CreateFailureResult(string checkId, string errorCode, string message, Exception? exception = null)
+{
+    var result = IsTransientNetworkFailure(exception, message) ? "WARN" : "FAIL";
+    return new CheckResult(checkId, result, message, errorCode);
+}
+
+static bool IsTransientNetworkFailure(Exception? exception, string? message = null)
+{
+    var text = $"{message} {exception}".ToLowerInvariant();
+
+    if (text.Contains("timeout") ||
+        text.Contains("timed out") ||
+        text.Contains("dns") ||
+        text.Contains("name or service not known") ||
+        text.Contains("temporary failure in name resolution") ||
+        text.Contains("no such host") ||
+        text.Contains("connection refused") ||
+        text.Contains("connection reset") ||
+        text.Contains("network is unreachable"))
+    {
+        return true;
+    }
+
+    for (var current = exception; current is not null; current = current.InnerException)
+    {
+        if (current is TimeoutException ||
+            current is HttpRequestException ||
+            current is TaskCanceledException)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static async Task<string> SeedRadikoProgramForRealtimeRecordingAsync(
@@ -1497,6 +1580,11 @@ file sealed class CanaryStatus
     public required string TimestampJst { get; init; }
     public required List<CheckResult> Checks { get; init; }
 }
+
+file sealed record RadiruOnDemandCandidate(
+    RadiruProgramJsonEntity Program,
+    string OnDemandUrl,
+    DateTime ExpiresAtUtc);
 
 file sealed record ProgramSchemaIssue(string ProgramId, string Field, string Reason);
 file sealed record ProgramSchemaValidationResult(
