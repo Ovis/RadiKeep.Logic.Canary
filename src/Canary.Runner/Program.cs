@@ -44,6 +44,9 @@ var radikoPassword = GetArg(argsMap, "radiko-password", Environment.GetEnvironme
 var realtimeRecordSeconds = int.TryParse(GetArg(argsMap, "realtime-record-seconds", "30"), out var parsedSeconds)
     ? Math.Max(10, Math.Min(parsedSeconds, 180))
     : 30;
+var timefreeRecordSeconds = int.TryParse(GetArg(argsMap, "timefree-record-seconds", "30"), out var parsedTimefreeSeconds)
+    ? Math.Max(10, Math.Min(parsedTimefreeSeconds, 120))
+    : 30;
 
 Directory.CreateDirectory(Path.GetDirectoryName(statusPath) ?? ".");
 Directory.CreateDirectory(logDir);
@@ -84,6 +87,14 @@ try
         recordOutputDir,
         Path.Combine(logDir, "C003_RADIKO_REALTIME_RECORD.log"));
     checks.Add(c003Radiko);
+
+    var c004RadikoTimefree = await CheckRadikoTimeFreeRecordingAsync(
+        logicContext,
+        radikoStationId,
+        timefreeRecordSeconds,
+        recordOutputDir,
+        Path.Combine(logDir, "C004_RADIKO_TIMEFREE_RECORD.log"));
+    checks.Add(c004RadikoTimefree);
 
     var c003Radiru = await CheckRadiruRealtimeRecordingAsync(
         logicContext,
@@ -690,6 +701,127 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
     }
 }
 
+static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
+    LogicContext logicContext,
+    string preferredStationId,
+    int recordSeconds,
+    string recordOutputDir,
+    string logPath)
+{
+    var log = new StringBuilder();
+    log.AppendLine($"check=C004_RADIKO_TIMEFREE preferred_station={preferredStationId} seconds={recordSeconds}");
+
+    try
+    {
+        var login = await logicContext.RadikoLogic.LoginRadikoAsync(forceRefresh: true);
+        if (!login.IsSuccess || string.IsNullOrWhiteSpace(login.Session))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko login failed.", "E-C004-RADIKO-LOGIN");
+        }
+
+        var areaResult = await logicContext.RadikoLogic.GetRadikoAreaAsync(forceRefresh: true);
+        if (!areaResult.IsSuccess || string.IsNullOrWhiteSpace(areaResult.Area))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko area detection failed.", "E-C004-RADIKO-AREA");
+        }
+        var area = areaResult.Area;
+
+        var currentAreaStations = await logicContext.RadikoApiClient.GetStationsByAreaAsync(area);
+        if (currentAreaStations.Count == 0)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "No stations resolved for current area.", "E-C004-RADIKO-STATIONS");
+        }
+
+        var stationId = preferredStationId;
+        if (!login.IsAreaFree && !currentAreaStations.Contains(preferredStationId, StringComparer.OrdinalIgnoreCase))
+        {
+            stationId = currentAreaStations[0];
+        }
+
+        var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
+        var candidate = await FindRadikoTimeFreeCandidateAsync(logicContext, stationId, now, recordSeconds);
+        if (candidate is null && !login.IsAreaFree)
+        {
+            foreach (var candidateStation in currentAreaStations.Take(5))
+            {
+                candidate = await FindRadikoTimeFreeCandidateAsync(logicContext, candidateStation, now, recordSeconds);
+                if (candidate is not null)
+                {
+                    stationId = candidateStation;
+                    break;
+                }
+            }
+        }
+
+        if (candidate is null)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "No timefree candidate program found.", "E-C004-RADIKO-NO-CANDIDATE");
+        }
+
+        var seededProgramId = await SeedRadikoProgramForTimeFreeRecordingAsync(
+            logicContext,
+            stationId,
+            candidate.Value.Title,
+            area,
+            candidate.Value.StartTime,
+            candidate.Value.EndTime,
+            recordSeconds);
+        var command = new RecordingCommand(
+            RadioServiceKind.Radiko,
+            seededProgramId,
+            candidate.Value.Title,
+            IsTimeFree: true,
+            StartDelaySeconds: 0,
+            EndDelaySeconds: 0);
+        var source = new RadikoRecordingSource(
+            NullLogger<RadikoRecordingSource>.Instance,
+            logicContext.ProgramScheduleLobLogic,
+            logicContext.StationLobLogic,
+            logicContext.RadikoLogic,
+            logicContext.RadikoApiClient,
+            logicContext.DbContext);
+        var sourceResult = await source.PrepareAsync(command);
+
+        var outputPath = Path.Combine(recordOutputDir, $"radiko-timefree-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
+        var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
+
+        log.AppendLine($"selected_station={stationId}");
+        log.AppendLine($"timefree_program={candidate.Value.Title}");
+        log.AppendLine($"timefree_program_start={candidate.Value.StartTime:O}");
+        log.AppendLine($"timefree_program_end={candidate.Value.EndTime:O}");
+        log.AppendLine($"seed_program_id={seededProgramId}");
+        log.AppendLine($"output={outputPath}");
+        log.AppendLine($"logic_recorded={recorded}");
+
+        if (!recorded || !File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko timefree recording failed.", "E-C004-RADIKO-RECORD");
+        }
+
+        var bytes = new FileInfo(outputPath).Length;
+        if (bytes < 32 * 1024)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C004-RADIKO-SIZE");
+        }
+
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "PASS", $"radiko timefree recording succeeded. bytes={bytes}", string.Empty);
+    }
+    catch (Exception ex)
+    {
+        log.AppendLine(ex.ToString());
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", $"radiko timefree check failed: {ex.Message}", "E-C004-RADIKO-EXCEPTION");
+    }
+}
+
 static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
     LogicContext logicContext,
     string areaId,
@@ -787,6 +919,43 @@ static async Task<(string StationId, string ProgramId, string Title)?> FindRadik
     return null;
 }
 
+static async Task<(string ProgramId, string Title, DateTimeOffset StartTime, DateTimeOffset EndTime)?> FindRadikoTimeFreeCandidateAsync(
+    LogicContext logicContext,
+    string stationId,
+    DateTimeOffset nowJst,
+    int recordSeconds)
+{
+    var programs = await logicContext.RadikoApiClient.GetWeeklyProgramsAsync(stationId);
+    var minimumDuration = Math.Max(recordSeconds, 10);
+    var cutoff = nowJst.AddMinutes(-3);
+
+    var candidate = programs
+        .Where(p =>
+            !string.IsNullOrWhiteSpace(p.ProgramId) &&
+            !string.IsNullOrWhiteSpace(p.Title) &&
+            p.StartTime != default &&
+            p.EndTime != default &&
+            p.EndTime > p.StartTime)
+        .Select(p => new
+        {
+            Program = p,
+            StartJst = TimeZoneInfo.ConvertTime(p.StartTime, ResolveJapanTimeZone()),
+            EndJst = TimeZoneInfo.ConvertTime(p.EndTime, ResolveJapanTimeZone())
+        })
+        .Where(x =>
+            x.EndJst <= cutoff &&
+            (x.EndJst - x.StartJst).TotalSeconds >= minimumDuration)
+        .OrderByDescending(x => x.EndJst)
+        .FirstOrDefault();
+
+    if (candidate is null)
+    {
+        return null;
+    }
+
+    return (candidate.Program.ProgramId, candidate.Program.Title, candidate.StartJst, candidate.EndJst);
+}
+
 static string GetProgramDataLogPath(string logPath)
 {
     var logDirectory = Path.GetDirectoryName(logPath) ?? ".";
@@ -847,6 +1016,69 @@ static async Task<string> SeedRadikoProgramForRealtimeRecordingAsync(
         EndTime = end,
         Performer = string.Empty,
         Description = "canary realtime record",
+        AvailabilityTimeFree = AvailabilityTimeFree.Available,
+        ProgramUrl = string.Empty,
+        ImageUrl = string.Empty
+    });
+
+    await logicContext.DbContext.SaveChangesAsync();
+    return programId;
+}
+
+static async Task<string> SeedRadikoProgramForTimeFreeRecordingAsync(
+    LogicContext logicContext,
+    string stationId,
+    string title,
+    string areaId,
+    DateTimeOffset sourceStartTime,
+    DateTimeOffset sourceEndTime,
+    int recordSeconds)
+{
+    var start = sourceStartTime;
+    var endLimit = start.AddSeconds(recordSeconds);
+    var end = sourceEndTime <= endLimit ? sourceEndTime : endLimit;
+    if (end <= start)
+    {
+        end = start.AddSeconds(Math.Max(10, recordSeconds));
+    }
+
+    var programId = $"canary-radiko-timefree-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+
+    if (!logicContext.RadikoStationDic.ContainsKey(stationId))
+    {
+        logicContext.RadikoStationDic[stationId] = stationId;
+    }
+
+    var station = await logicContext.DbContext.RadikoStations.FindAsync(stationId);
+    if (station is null)
+    {
+        await logicContext.DbContext.RadikoStations.AddAsync(new RadikoStation
+        {
+            StationId = stationId,
+            RegionId = areaId,
+            RegionName = areaId,
+            RegionOrder = 0,
+            Area = areaId,
+            StationName = logicContext.RadikoStationDic[stationId],
+            StationUrl = string.Empty,
+            LogoPath = string.Empty,
+            AreaFree = true,
+            TimeFree = true,
+            StationOrder = 0
+        });
+    }
+
+    await logicContext.DbContext.RadikoPrograms.AddAsync(new RadikoProgram
+    {
+        ProgramId = programId,
+        StationId = stationId,
+        Title = title,
+        RadioDate = start.ToRadioDate(),
+        DaysOfWeek = start.ToRadioDayOfWeek().ToDaysOfWeek(),
+        StartTime = start,
+        EndTime = end,
+        Performer = string.Empty,
+        Description = "canary timefree record",
         AvailabilityTimeFree = AvailabilityTimeFree.Available,
         ProgramUrl = string.Empty,
         ImageUrl = string.Empty
