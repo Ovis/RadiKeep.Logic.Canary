@@ -106,6 +106,12 @@ jobs:
           EOF
           fi
 
+      - name: Remove recorded media before artifact upload
+        if: always()
+        shell: bash
+        run: |
+          rm -rf artifacts/recordings/*
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -114,7 +120,6 @@ jobs:
           path: |
             results/status.json
             logs/**
-            artifacts/recordings/**
           if-no-files-found: warn
           retention-days: 14
 

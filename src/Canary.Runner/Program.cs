@@ -1,8 +1,35 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
-using System.Xml.Linq;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.EntityFrameworkCore;
+using Moq;
+using RadiKeep.Logics.ApiClients;
+using RadiKeep.Logics.Application;
+using RadiKeep.Logics.Context;
+using RadiKeep.Logics.Domain.Station;
+using RadiKeep.Logics.Domain.Recording;
+using RadiKeep.Logics.Extensions;
+using RadiKeep.Logics.Interfaces;
+using RadiKeep.Logics.Infrastructure.ProgramSchedule;
+using RadiKeep.Logics.Infrastructure.Recording;
+using RadiKeep.Logics.Logics.ProgramScheduleLogic;
+using RadiKeep.Logics.Logics.RecordJobLogic;
+using RadiKeep.Logics.Logics.RadikoLogic;
+using RadiKeep.Logics.Logics.StationLogic;
+using RadiKeep.Logics.Mappers;
+using RadiKeep.Logics.Models.NhkRadiru;
+using RadiKeep.Logics.Models.NhkRadiru.JsonEntity;
+using RadiKeep.Logics.Models.Enums;
+using RadiKeep.Logics.Models.Radiko;
+using RadiKeep.Logics.Primitives;
+using RadiKeep.Logics.Primitives.DataAnnotations;
+using RadiKeep.Logics.RdbContext;
+using RadiKeep.Logics.Services;
 
 var argsMap = ParseArgs(args);
 
@@ -12,6 +39,11 @@ var recordOutputDir = GetArg(argsMap, "record-output-dir", "artifacts/recordings
 var radikoStationId = GetArg(argsMap, "radiko-station-id", "TBS");
 var radiruAreaId = GetArg(argsMap, "radiru-area-id", "JP13");
 var radiruStationId = GetArg(argsMap, "radiru-station-id", "r1");
+var radikoUserId = GetArg(argsMap, "radiko-user-id", Environment.GetEnvironmentVariable("RADIKO_USER_ID") ?? string.Empty);
+var radikoPassword = GetArg(argsMap, "radiko-password", Environment.GetEnvironmentVariable("RADIKO_PASSWORD") ?? string.Empty);
+var realtimeRecordSeconds = int.TryParse(GetArg(argsMap, "realtime-record-seconds", "30"), out var parsedSeconds)
+    ? Math.Max(10, Math.Min(parsedSeconds, 180))
+    : 30;
 
 Directory.CreateDirectory(Path.GetDirectoryName(statusPath) ?? ".");
 Directory.CreateDirectory(logDir);
@@ -26,16 +58,41 @@ try
 
     var todayJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone()).Date;
     using var httpClient = CreateHttpClient();
-    var c001 = await CheckRadikoDailyFetchAsync(httpClient, radikoStationId, todayJst, Path.Combine(logDir, "C001_RADIKO_DAILY_FETCH.log"));
+    using var logicContext = CreateLogicContext(radikoUserId, radikoPassword);
+    var c001 = await CheckRadikoDailyFetchAsync(logicContext, radikoStationId, todayJst, Path.Combine(logDir, "C001_RADIKO_DAILY_FETCH.log"));
     checks.Add(c001);
 
     var c002 = await CheckRadiruDailyFetchAsync(
-        httpClient,
+        logicContext,
         radiruAreaId,
         radiruStationId,
         todayJst,
         Path.Combine(logDir, "C002_RADIRU_DAILY_FETCH.log"));
     checks.Add(c002);
+
+    var c010 = await CheckRadikoLoginAsync(
+        logicContext,
+        radikoUserId,
+        radikoPassword,
+        Path.Combine(logDir, "C010_RADIKO_LOGIN.log"));
+    checks.Add(c010);
+
+    var c003Radiko = await CheckRadikoRealtimeRecordingAsync(
+        logicContext,
+        radikoStationId,
+        realtimeRecordSeconds,
+        recordOutputDir,
+        Path.Combine(logDir, "C003_RADIKO_REALTIME_RECORD.log"));
+    checks.Add(c003Radiko);
+
+    var c003Radiru = await CheckRadiruRealtimeRecordingAsync(
+        logicContext,
+        radiruAreaId,
+        radiruStationId,
+        realtimeRecordSeconds,
+        recordOutputDir,
+        Path.Combine(logDir, "C003_RADIRU_REALTIME_RECORD.log"));
+    checks.Add(c003Radiru);
 
     var overall = checks.All(c => c.Result == "PASS") ? "PASS" : "FAIL";
     var summary = new CanaryStatus
@@ -100,58 +157,38 @@ static HttpClient CreateHttpClient()
     return client;
 }
 
-static async Task<CheckResult> CheckRadikoDailyFetchAsync(HttpClient httpClient, string stationId, DateTime dateJst, string logPath)
+static async Task<CheckResult> CheckRadikoDailyFetchAsync(LogicContext logicContext, string stationId, DateTime dateJst, string logPath)
 {
     var log = new StringBuilder();
-    var url = $"http://radiko.jp/v3/program/station/weekly/{stationId}.xml";
     log.AppendLine($"check=C001 station={stationId} date={dateJst:yyyy-MM-dd}");
-    log.AppendLine($"url={url}");
 
     try
     {
-        var response = await GetWithRetryAsync(httpClient, url);
-        log.AppendLine($"status={(int)response.StatusCode}");
-        response.EnsureSuccessStatusCode();
-
-        var xml = await response.Content.ReadAsStringAsync();
-        var doc = XDocument.Parse(xml);
-        var datePrefix = dateJst.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-
-        var programs = doc
-            .Descendants("prog")
-            .Where(p => (p.Attribute("ft")?.Value ?? string.Empty).StartsWith(datePrefix, StringComparison.Ordinal))
+        var programs = (await logicContext.RadikoApiClient.GetWeeklyProgramsAsync(stationId))
+            .Where(p =>
+            {
+                var jstStart = TimeZoneInfo.ConvertTime(p.StartTime, ResolveJapanTimeZone());
+                return jstStart.Date == dateJst.Date;
+            })
             .ToList();
+        var programDataPath = GetProgramDataLogPath(logPath);
+        await WriteJsonLogAsync(programDataPath, programs);
 
         log.AppendLine($"program_count={programs.Count}");
+        log.AppendLine($"program_data_log={programDataPath}");
         if (programs.Count == 0)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
             return new CheckResult("C001_RADIKO_DAILY_FETCH", "FAIL", "Program list is empty.", "E-C001-EMPTY");
         }
 
-        var invalid = 0;
-        foreach (var p in programs)
-        {
-            var ft = p.Attribute("ft")?.Value ?? string.Empty;
-            var to = p.Attribute("to")?.Value ?? string.Empty;
-            var title = p.Element("title")?.Value?.Trim() ?? string.Empty;
-            var programId = $"{stationId}_{ft}{to}";
+        var validation = ValidateRadikoPrograms(programs);
+        AppendValidationLog(log, validation, programs.Count);
 
-            if (string.IsNullOrWhiteSpace(ft) ||
-                string.IsNullOrWhiteSpace(to) ||
-                string.IsNullOrWhiteSpace(title) ||
-                !TryParseRadikoDateTime(ft, out _) ||
-                !TryParseRadikoDateTime(to, out _))
-            {
-                invalid++;
-                log.AppendLine($"invalid_program id={programId} ft={ft} to={to} title_empty={string.IsNullOrWhiteSpace(title)}");
-            }
-        }
-
-        if (invalid > 0)
+        if (validation.RequiredIssues.Count > 0)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C001_RADIKO_DAILY_FETCH", "FAIL", $"Invalid programs found: {invalid}", "E-C001-SCHEMA");
+            return new CheckResult("C001_RADIKO_DAILY_FETCH", "FAIL", $"Invalid programs found: {validation.RequiredIssues.Count}", "E-C001-SCHEMA");
         }
 
         await File.WriteAllTextAsync(logPath, log.ToString());
@@ -166,7 +203,7 @@ static async Task<CheckResult> CheckRadikoDailyFetchAsync(HttpClient httpClient,
 }
 
 static async Task<CheckResult> CheckRadiruDailyFetchAsync(
-    HttpClient httpClient,
+    LogicContext logicContext,
     string areaId,
     string stationId,
     DateTime dateJst,
@@ -178,101 +215,38 @@ static async Task<CheckResult> CheckRadiruDailyFetchAsync(
 
     try
     {
-        const string configUrl = "https://www.nhk.or.jp/radio/config/config_web.xml";
-        var configResponse = await GetWithRetryAsync(httpClient, configUrl);
-        log.AppendLine($"config_status={(int)configResponse.StatusCode}");
-        configResponse.EnsureSuccessStatusCode();
-
-        var configXml = await configResponse.Content.ReadAsStringAsync();
-        var configDoc = XDocument.Parse(configXml);
-        var dailyTemplate = configDoc.Descendants("url_program_day").FirstOrDefault()?.Value ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(dailyTemplate))
+        var areaKind = Enum.GetValues<RadiruAreaKind>()
+            .FirstOrDefault(x => x.GetEnumCodeId() == normalizedAreaKey);
+        var stationKind = Enumeration.GetAll<RadiruStationKind>()
+            .FirstOrDefault(x => string.Equals(x.ServiceId, stationId, StringComparison.OrdinalIgnoreCase));
+        if (stationKind is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", "url_program_day is missing in config.", "E-C002-SCHEMA");
+            return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", "Unknown radiru station.", "E-C002-SCHEMA");
         }
 
-        var areaData = configDoc
-            .Descendants("stream_url")
-            .Descendants("data")
-            .FirstOrDefault(x => string.Equals(x.Descendants("areakey").FirstOrDefault()?.Value, normalizedAreaKey, StringComparison.OrdinalIgnoreCase));
-        var apiKey = areaData?.Descendants("apikey").FirstOrDefault()?.Value ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(apiKey))
-        {
-            await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", $"apikey is missing for area {areaId}.", "E-C002-SCHEMA");
-        }
+        await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
 
-        var dailyUrl = ReplaceFirst(dailyTemplate, "{area}", normalizedAreaKey)
-            .Replace("{area}", apiKey, StringComparison.Ordinal)
-            .Replace("{service}", stationId, StringComparison.Ordinal)
-            .Replace("[YYYY-MM-DD]", dateJst.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), StringComparison.Ordinal);
-        log.AppendLine($"daily_template={dailyTemplate}");
-        log.AppendLine($"resolved_api_key={apiKey}");
-        if (dailyUrl.StartsWith("//", StringComparison.Ordinal))
-        {
-            dailyUrl = "https:" + dailyUrl;
-        }
-        else if (dailyUrl.StartsWith("/", StringComparison.Ordinal))
-        {
-            dailyUrl = "https://www.nhk.or.jp" + dailyUrl;
-        }
-        else if (dailyUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-        {
-            dailyUrl = "https://" + dailyUrl["http://".Length..];
-        }
-
-        log.AppendLine($"daily_url={dailyUrl}");
-        var dailyResponse = await GetWithRetryAsync(httpClient, dailyUrl);
-        log.AppendLine($"daily_status={(int)dailyResponse.StatusCode}");
-        dailyResponse.EnsureSuccessStatusCode();
-
-        var json = await dailyResponse.Content.ReadAsStringAsync();
-        using var doc = JsonDocument.Parse(json);
-        var publications = new List<JsonElement>();
-
-        foreach (var prop in doc.RootElement.EnumerateObject())
-        {
-            if (prop.Value.ValueKind != JsonValueKind.Object)
-            {
-                continue;
-            }
-
-            if (prop.Value.TryGetProperty("publication", out var publication) && publication.ValueKind == JsonValueKind.Array)
-            {
-                publications.AddRange(publication.EnumerateArray());
-            }
-        }
+        var targetDate = new DateTimeOffset(dateJst, ResolveJapanTimeZone().GetUtcOffset(dateJst));
+        var publications = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaKind, stationKind, targetDate);
+        var programDataPath = GetProgramDataLogPath(logPath);
+        await WriteJsonLogAsync(programDataPath, publications);
 
         log.AppendLine($"program_count={publications.Count}");
+        log.AppendLine($"program_data_log={programDataPath}");
         if (publications.Count == 0)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
             return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", "Program list is empty.", "E-C002-EMPTY");
         }
 
-        var invalid = 0;
-        foreach (var item in publications)
-        {
-            var id = ReadString(item, "id");
-            var title = ReadString(item, "name");
-            var startDate = ReadString(item, "startDate");
-            var endDate = ReadString(item, "endDate");
+        var validation = ValidateRadiruPrograms(publications);
+        AppendValidationLog(log, validation, publications.Count);
 
-            if (string.IsNullOrWhiteSpace(id) ||
-                string.IsNullOrWhiteSpace(title) ||
-                !DateTimeOffset.TryParse(startDate, out _) ||
-                !DateTimeOffset.TryParse(endDate, out _))
-            {
-                invalid++;
-                log.AppendLine($"invalid_program id={id} title_empty={string.IsNullOrWhiteSpace(title)} start={startDate} end={endDate}");
-            }
-        }
-
-        if (invalid > 0)
+        if (validation.RequiredIssues.Count > 0)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
-            return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", $"Invalid programs found: {invalid}", "E-C002-SCHEMA");
+            return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", $"Invalid programs found: {validation.RequiredIssues.Count}", "E-C002-SCHEMA");
         }
 
         await File.WriteAllTextAsync(logPath, log.ToString());
@@ -286,81 +260,139 @@ static async Task<CheckResult> CheckRadiruDailyFetchAsync(
     }
 }
 
-static async Task<HttpResponseMessage> GetWithRetryAsync(HttpClient httpClient, string url)
+static ProgramSchemaValidationResult ValidateRadikoPrograms(
+    IReadOnlyList<RadikoProgram> programs)
 {
-    Exception? last = null;
-    for (var i = 0; i < 3; i++)
+    var requiredIssues = new List<ProgramSchemaIssue>();
+    var optionalMissing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    var seenProgramIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    for (var i = 0; i < programs.Count; i++)
     {
-        try
+        var p = programs[i];
+        var idForLog = string.IsNullOrWhiteSpace(p.ProgramId) ? $"index:{i}" : p.ProgramId;
+
+        if (string.IsNullOrWhiteSpace(p.ProgramId))
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.AcceptEncoding.ParseAdd("gzip");
-            request.Headers.AcceptEncoding.ParseAdd("br");
-            var response = await httpClient.SendAsync(request);
-            if ((int)response.StatusCode >= 500 && i < 2)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(500 * (i + 1)));
-                continue;
-            }
-
-            return response;
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "ProgramId", "missing"));
         }
-        catch (Exception ex)
+        else if (!seenProgramIds.Add(p.ProgramId))
         {
-            last = ex;
-            if (i < 2)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(500 * (i + 1)));
-            }
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "ProgramId", "duplicate"));
         }
+
+        if (string.IsNullOrWhiteSpace(p.StationId))
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "StationId", "missing"));
+        }
+
+        if (string.IsNullOrWhiteSpace(p.Title))
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "Title", "missing"));
+        }
+
+        if (p.StartTime == default)
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "StartTime", "missing_or_invalid"));
+        }
+
+        if (p.EndTime == default)
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "EndTime", "missing_or_invalid"));
+        }
+
+        if (p.StartTime != default && p.EndTime != default && p.EndTime <= p.StartTime)
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "Duration", "end_before_or_equal_start"));
+        }
+
+        CountOptionalIfMissing(optionalMissing, "Performer", p.Performer);
+        CountOptionalIfMissing(optionalMissing, "Description", p.Description);
+        CountOptionalIfMissing(optionalMissing, "ProgramUrl", p.ProgramUrl);
+        CountOptionalIfMissing(optionalMissing, "ImageUrl", p.ImageUrl);
     }
 
-    throw last ?? new InvalidOperationException("HTTP request failed.");
+    return new ProgramSchemaValidationResult(requiredIssues, optionalMissing);
 }
 
-static bool TryParseRadikoDateTime(string value, out DateTimeOffset dateTimeOffset)
+static ProgramSchemaValidationResult ValidateRadiruPrograms(
+    IReadOnlyList<RadiruProgramJsonEntity> programs)
 {
-    dateTimeOffset = default;
-    if (!DateTime.TryParseExact(
-            value,
-            "yyyyMMddHHmmss",
-            CultureInfo.InvariantCulture,
-            DateTimeStyles.None,
-            out var dateTime))
+    var requiredIssues = new List<ProgramSchemaIssue>();
+    var optionalMissing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    var seenProgramIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    for (var i = 0; i < programs.Count; i++)
     {
-        return false;
+        var p = programs[i];
+        var idForLog = string.IsNullOrWhiteSpace(p.Id) ? $"index:{i}" : p.Id;
+
+        if (string.IsNullOrWhiteSpace(p.Id))
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "Id", "missing"));
+        }
+        else if (!seenProgramIds.Add(p.Id))
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "Id", "duplicate"));
+        }
+
+        if (string.IsNullOrWhiteSpace(p.Name))
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "Name", "missing"));
+        }
+
+        if (p.StartDate == default)
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "StartDate", "missing_or_invalid"));
+        }
+
+        if (p.EndDate == default)
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "EndDate", "missing_or_invalid"));
+        }
+
+        if (p.StartDate != default && p.EndDate != default && p.EndDate <= p.StartDate)
+        {
+            requiredIssues.Add(new ProgramSchemaIssue(idForLog, "Duration", "end_before_or_equal_start"));
+        }
+
+        CountOptionalIfMissing(optionalMissing, "Description", p.Description);
+        CountOptionalIfMissing(optionalMissing, "Url", p.Url);
+        CountOptionalIfMissing(optionalMissing, "IdentifierGroup.ServiceId", p.IdentifierGroup.ServiceId);
+        CountOptionalIfMissing(optionalMissing, "IdentifierGroup.AreaId", p.IdentifierGroup.AreaId);
+        CountOptionalIfMissing(optionalMissing, "IdentifierGroup.RadioEpisodeName", p.IdentifierGroup.RadioEpisodeName);
+        CountOptionalIfMissing(optionalMissing, "About.Url", p.About.Url);
+        CountOptionalIfMissing(optionalMissing, "About.PartOfSeries.Logo.Medium.Url", p.About.PartOfSeries.Logo.Medium.Url);
     }
 
-    var jst = ResolveJapanTimeZone();
-    var offset = jst.GetUtcOffset(dateTime);
-    dateTimeOffset = new DateTimeOffset(dateTime, offset);
-    return true;
+    return new ProgramSchemaValidationResult(requiredIssues, optionalMissing);
 }
 
-static string ReadString(JsonElement element, string propertyName)
+static void AppendValidationLog(StringBuilder log, ProgramSchemaValidationResult validation, int totalCount)
 {
-    if (!element.TryGetProperty(propertyName, out var value))
+    log.AppendLine($"required_issue_count={validation.RequiredIssues.Count}");
+
+    foreach (var issue in validation.RequiredIssues.Take(20))
     {
-        return string.Empty;
+        log.AppendLine($"required_issue program={issue.ProgramId} field={issue.Field} reason={issue.Reason}");
     }
 
-    return value.ValueKind switch
+    foreach (var missing in validation.OptionalMissingCounts.OrderBy(x => x.Key))
     {
-        JsonValueKind.String => value.GetString() ?? string.Empty,
-        JsonValueKind.Number => value.ToString(),
-        _ => string.Empty
-    };
+        var ratio = totalCount == 0 ? 0 : (double)missing.Value / totalCount;
+        log.AppendLine($"optional_missing field={missing.Key} count={missing.Value} ratio={ratio:F3}");
+    }
 }
 
-static string ReplaceFirst(string text, string search, string replacement)
+static void CountOptionalIfMissing(Dictionary<string, int> counts, string fieldName, string? value)
 {
-    var index = text.IndexOf(search, StringComparison.Ordinal);
-    if (index < 0)
+    if (!string.IsNullOrWhiteSpace(value))
     {
-        return text;
+        return;
     }
 
-    return string.Concat(text.AsSpan(0, index), replacement, text.AsSpan(index + search.Length));
+    counts.TryGetValue(fieldName, out var current);
+    counts[fieldName] = current + 1;
 }
 
 static string NormalizeRadiruAreaKey(string areaId)
@@ -381,6 +413,484 @@ static string NormalizeRadiruAreaKey(string areaId)
     }
 
     return trimmed;
+}
+
+static LogicContext CreateLogicContext(string radikoUserId, string radikoPassword)
+{
+    var services = new ServiceCollection();
+    services.AddHttpClient(HttpClientNames.Radiko).ConfigurePrimaryHttpMessageHandler(() =>
+        new HttpClientHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.Brotli |
+                                     System.Net.DecompressionMethods.GZip |
+                                     System.Net.DecompressionMethods.Deflate
+        });
+    services.AddHttpClient(HttpClientNames.Radiru).ConfigurePrimaryHttpMessageHandler(() =>
+        new HttpClientHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.Brotli |
+                                     System.Net.DecompressionMethods.GZip |
+                                     System.Net.DecompressionMethods.Deflate
+        });
+    var provider = services.BuildServiceProvider();
+    var httpClientFactory = provider.GetRequiredService<IHttpClientFactory>();
+    var workRoot = Path.Combine(Path.GetTempPath(), "radikeep-canary");
+    var tempRoot = Path.Combine(workRoot, "temp");
+    var logRoot = Path.Combine(workRoot, "logs");
+    Directory.CreateDirectory(tempRoot);
+    Directory.CreateDirectory(logRoot);
+
+    var configMock = new Mock<IAppConfigurationService>();
+    var stationDic = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    configMock.SetupGet(x => x.RadikoStationDic).Returns(stationDic);
+    configMock.SetupGet(x => x.ExternalServiceUserAgent).Returns("RadiKeep.Logic.Canary/0.1");
+    configMock.SetupGet(x => x.TemporaryFileSaveDir).Returns(tempRoot);
+    configMock.SetupGet(x => x.FfmpegExecutablePath).Returns(string.Empty);
+    configMock.SetupGet(x => x.EmbedProgramImageOnRecord).Returns(false);
+    configMock.SetupGet(x => x.RadiruApiMinRequestIntervalMs).Returns(0);
+    configMock.SetupGet(x => x.RadiruApiRequestJitterMs).Returns(0);
+    configMock.SetupGet(x => x.IsRadikoAreaFree).Returns(false);
+    configMock.Setup(x => x.UpdateRadikoPremiumUser(It.IsAny<bool>()));
+    configMock.Setup(x => x.UpdateRadikoAreaFree(It.IsAny<bool>()));
+    configMock.Setup(x => x.UpdateRadikoStationDic(It.IsAny<List<RadikoStation>>()))
+        .Callback<List<RadikoStation>>(stations =>
+        {
+            foreach (var station in stations)
+            {
+                stationDic[station.StationId] = station.StationName;
+            }
+        });
+    configMock.Setup(x => x.ChooseStationName(It.IsAny<RadioServiceKind>(), It.IsAny<string>()))
+        .Returns<RadioServiceKind, string>((kind, stationId) =>
+            stationDic.TryGetValue(stationId, out var name) ? name : stationId);
+    configMock.Setup(x => x.TryGetRadikoCredentialsAsync())
+        .Returns(ValueTask.FromResult(
+            (!string.IsNullOrWhiteSpace(radikoUserId) && !string.IsNullOrWhiteSpace(radikoPassword),
+             radikoUserId,
+             radikoPassword)));
+
+    var stationRepository = new InMemoryStationRepository();
+    var radikoLogic = new RadikoUniqueProcessLogic(
+        NullLogger<RadikoUniqueProcessLogic>.Instance,
+        configMock.Object,
+        httpClientFactory);
+    var radikoApiClient = new RadikoApiClient(
+        NullLogger<RadikoApiClient>.Instance,
+        configMock.Object,
+        httpClientFactory);
+    var entryMapper = new EntryMapper(configMock.Object);
+    var stationLobLogic = new StationLobLogic(
+        NullLogger<StationLobLogic>.Instance,
+        configMock.Object,
+        radikoApiClient,
+        stationRepository,
+        radikoLogic,
+        httpClientFactory,
+        entryMapper);
+    var radiruApiClient = new RadiruApiClient(
+        NullLogger<RadiruApiClient>.Instance,
+        stationLobLogic,
+        configMock.Object,
+        httpClientFactory);
+
+    var dbOptions = new DbContextOptionsBuilder<RadioDbContext>()
+        .UseSqlite($"Data Source={Path.Combine(workRoot, "canary.db")}")
+        .Options;
+    var dbContext = new RadioDbContext(dbOptions);
+    dbContext.Database.EnsureCreated();
+
+    var appContext = new RadioAppContext();
+    var programScheduleRepository = new ProgramScheduleRepository(dbContext);
+    var entryMapperForSchedule = new EntryMapper(configMock.Object);
+    var programScheduleLobLogic = new ProgramScheduleLobLogic(
+        NullLogger<ProgramScheduleLobLogic>.Instance,
+        appContext,
+        radikoApiClient,
+        radiruApiClient,
+        programScheduleRepository,
+        null!,
+        entryMapperForSchedule,
+        null);
+
+    var inMemoryConfig = new ConfigurationBuilder()
+        .AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["RadiKeep:LogDirectory"] = logRoot
+        })
+        .Build();
+    var ffmpegService = new FfmpegService(
+        NullLogger<IFfmpegService>.Instance,
+        configMock.Object,
+        inMemoryConfig);
+    var mediaTranscodeService = new MediaTranscodeService(
+        NullLogger<MediaTranscodeService>.Instance,
+        ffmpegService,
+        configMock.Object,
+        httpClientFactory);
+
+    return new LogicContext(
+        provider,
+        dbContext,
+        stationDic,
+        radikoLogic,
+        radikoApiClient,
+        stationLobLogic,
+        radiruApiClient,
+        programScheduleLobLogic,
+        mediaTranscodeService);
+}
+
+static async Task<CheckResult> CheckRadikoLoginAsync(
+    LogicContext logicContext,
+    string userId,
+    string password,
+    string logPath)
+{
+    var log = new StringBuilder();
+    log.AppendLine("check=C010");
+
+    if (string.IsNullOrWhiteSpace(userId) || string.IsNullOrWhiteSpace(password))
+    {
+        log.AppendLine("credentials_missing=true");
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C010_RADIKO_LOGIN", "FAIL", "RADIKO credentials are missing.", "E-C010-NO-CREDENTIALS");
+    }
+
+    try
+    {
+        var login = await logicContext.RadikoLogic.LoginRadikoAsync(forceRefresh: true);
+        if (!login.IsSuccess)
+        {
+            log.AppendLine("login_success=false");
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C010_RADIKO_LOGIN", "FAIL", "radiko login failed.", "E-C010-LOGIN");
+        }
+
+        log.AppendLine($"login_success=true is_premium={login.IsPremiumUser} is_area_free={login.IsAreaFree}");
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C010_RADIKO_LOGIN", "PASS", "radiko login succeeded.", string.Empty);
+    }
+    catch (Exception ex)
+    {
+        log.AppendLine(ex.ToString());
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C010_RADIKO_LOGIN", "FAIL", $"radiko login check failed: {ex.Message}", "E-C010-EXCEPTION");
+    }
+}
+
+static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
+    LogicContext logicContext,
+    string preferredStationId,
+    int recordSeconds,
+    string recordOutputDir,
+    string logPath)
+{
+    var log = new StringBuilder();
+    log.AppendLine($"check=C003_RADIKO preferred_station={preferredStationId} seconds={recordSeconds}");
+
+    try
+    {
+        var login = await logicContext.RadikoLogic.LoginRadikoAsync(forceRefresh: true);
+        if (!login.IsSuccess || string.IsNullOrWhiteSpace(login.Session))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko login failed.", "E-C003-RADIKO-LOGIN");
+        }
+
+        var areaResult = await logicContext.RadikoLogic.GetRadikoAreaAsync(forceRefresh: true);
+        if (!areaResult.IsSuccess || string.IsNullOrWhiteSpace(areaResult.Area))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko area detection failed.", "E-C003-RADIKO-AREA");
+        }
+        var area = areaResult.Area;
+
+        var currentAreaStations = await logicContext.RadikoApiClient.GetStationsByAreaAsync(area);
+        if (currentAreaStations.Count == 0)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "No stations resolved for current area.", "E-C003-RADIKO-STATIONS");
+        }
+
+        var stationId = preferredStationId;
+        if (!login.IsAreaFree && !currentAreaStations.Contains(preferredStationId, StringComparer.OrdinalIgnoreCase))
+        {
+            stationId = currentAreaStations[0];
+        }
+
+        var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
+        var onAirProgram = await FindRadikoNowOnAirProgramAsync(logicContext, stationId, now);
+        if (onAirProgram is null && !login.IsAreaFree)
+        {
+            foreach (var candidateStation in currentAreaStations.Take(5))
+            {
+                onAirProgram = await FindRadikoNowOnAirProgramAsync(logicContext, candidateStation, now);
+                if (onAirProgram is not null)
+                {
+                    stationId = candidateStation;
+                    break;
+                }
+            }
+        }
+
+        if (onAirProgram is null)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "No on-air program found for realtime record.", "E-C003-RADIKO-NO-ONAIR");
+        }
+
+        var seededProgramId = await SeedRadikoProgramForRealtimeRecordingAsync(logicContext, stationId, onAirProgram.Value.Title, area, recordSeconds);
+        var command = new RecordingCommand(
+            RadioServiceKind.Radiko,
+            seededProgramId,
+            onAirProgram.Value.Title,
+            IsTimeFree: false,
+            StartDelaySeconds: 0,
+            EndDelaySeconds: 0);
+        var source = new RadikoRecordingSource(
+            NullLogger<RadikoRecordingSource>.Instance,
+            logicContext.ProgramScheduleLobLogic,
+            logicContext.StationLobLogic,
+            logicContext.RadikoLogic,
+            logicContext.RadikoApiClient,
+            logicContext.DbContext);
+        var sourceResult = await source.PrepareAsync(command);
+
+        var outputPath = Path.Combine(recordOutputDir, $"radiko-realtime-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
+        var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
+
+        log.AppendLine($"selected_station={stationId}");
+        log.AppendLine($"onair_program={onAirProgram.Value.Title}");
+        log.AppendLine($"seed_program_id={seededProgramId}");
+        log.AppendLine($"output={outputPath}");
+        log.AppendLine($"logic_recorded={recorded}");
+
+        if (!recorded || !File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko realtime recording failed.", "E-C003-RADIKO-RECORD");
+        }
+
+        var bytes = new FileInfo(outputPath).Length;
+        if (bytes < 32 * 1024)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C003-RADIKO-SIZE");
+        }
+
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C003_RADIKO_REALTIME_RECORD", "PASS", $"radiko realtime recording succeeded. bytes={bytes}", string.Empty);
+    }
+    catch (Exception ex)
+    {
+        log.AppendLine(ex.ToString());
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", $"radiko realtime check failed: {ex.Message}", "E-C003-RADIKO-EXCEPTION");
+    }
+}
+
+static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
+    LogicContext logicContext,
+    string areaId,
+    string stationId,
+    int recordSeconds,
+    string recordOutputDir,
+    string logPath)
+{
+    var log = new StringBuilder();
+    log.AppendLine($"check=C003_RADIRU area={areaId} station={stationId} seconds={recordSeconds}");
+
+    try
+    {
+        var normalizedArea = NormalizeRadiruAreaKey(areaId);
+        var areaKind = Enum.GetValues<RadiruAreaKind>().First(x => x.GetEnumCodeId() == normalizedArea);
+        var stationKind = Enumeration.GetAll<RadiruStationKind>()
+            .FirstOrDefault(x => string.Equals(x.ServiceId, stationId, StringComparison.OrdinalIgnoreCase));
+        if (stationKind is null)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru station kind not found.", "E-C003-RADIRU-STATION");
+        }
+
+        await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
+        var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
+        var programs = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaKind, stationKind, now);
+        var onAirProgram = programs.FirstOrDefault(p => now >= p.StartDate && now <= p.EndDate);
+
+        if (onAirProgram is null)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "No on-air radiru program found.", "E-C003-RADIRU-NO-ONAIR");
+        }
+
+        var seededProgramId = await SeedRadiruProgramForRealtimeRecordingAsync(logicContext, normalizedArea, stationKind!, onAirProgram, recordSeconds);
+        var command = new RecordingCommand(
+            RadioServiceKind.Radiru,
+            seededProgramId,
+            onAirProgram.Name,
+            IsTimeFree: false,
+            StartDelaySeconds: 0,
+            EndDelaySeconds: 0);
+        var source = new RadiruRecordingSource(
+            NullLogger<RadiruRecordingSource>.Instance,
+            logicContext.ProgramScheduleLobLogic,
+            logicContext.StationLobLogic);
+        var sourceResult = await source.PrepareAsync(command);
+
+        var outputPath = Path.Combine(recordOutputDir, $"radiru-realtime-{normalizedArea}-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
+        var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
+
+        log.AppendLine($"onair_program={onAirProgram.Name}");
+        log.AppendLine($"seed_program_id={seededProgramId}");
+        log.AppendLine($"output={outputPath}");
+        log.AppendLine($"logic_recorded={recorded}");
+
+        if (!recorded || !File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru realtime recording failed.", "E-C003-RADIRU-RECORD");
+        }
+
+        var bytes = new FileInfo(outputPath).Length;
+        if (bytes < 32 * 1024)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C003-RADIRU-SIZE");
+        }
+
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C003_RADIRU_REALTIME_RECORD", "PASS", $"Radiru realtime recording succeeded. bytes={bytes}", string.Empty);
+    }
+    catch (Exception ex)
+    {
+        log.AppendLine(ex.ToString());
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", $"Radiru realtime check failed: {ex.Message}", "E-C003-RADIRU-EXCEPTION");
+    }
+}
+
+static async Task<(string StationId, string ProgramId, string Title)?> FindRadikoNowOnAirProgramAsync(LogicContext logicContext, string stationId, DateTimeOffset nowJst)
+{
+    var programs = await logicContext.RadikoApiClient.GetWeeklyProgramsAsync(stationId);
+    foreach (var p in programs)
+    {
+        var startJst = TimeZoneInfo.ConvertTime(p.StartTime, ResolveJapanTimeZone());
+        var endJst = TimeZoneInfo.ConvertTime(p.EndTime, ResolveJapanTimeZone());
+        if (nowJst >= startJst && nowJst <= endJst)
+        {
+            return (stationId, p.ProgramId, p.Title);
+        }
+    }
+
+    return null;
+}
+
+static string GetProgramDataLogPath(string logPath)
+{
+    var logDirectory = Path.GetDirectoryName(logPath) ?? ".";
+    var logFileNameWithoutExtension = Path.GetFileNameWithoutExtension(logPath);
+    return Path.Combine(logDirectory, $"{logFileNameWithoutExtension}_programs.json");
+}
+
+static async Task WriteJsonLogAsync<T>(string path, T payload)
+{
+    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+    await File.WriteAllTextAsync(path, json);
+}
+
+static async Task<string> SeedRadikoProgramForRealtimeRecordingAsync(
+    LogicContext logicContext,
+    string stationId,
+    string title,
+    string areaId,
+    int recordSeconds)
+{
+    var nowJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
+    var start = nowJst.AddSeconds(-2);
+    var end = nowJst.AddSeconds(recordSeconds);
+    var programId = $"canary-radiko-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+
+    if (!logicContext.RadikoStationDic.ContainsKey(stationId))
+    {
+        logicContext.RadikoStationDic[stationId] = stationId;
+    }
+
+    var station = await logicContext.DbContext.RadikoStations.FindAsync(stationId);
+    if (station is null)
+    {
+        await logicContext.DbContext.RadikoStations.AddAsync(new RadikoStation
+        {
+            StationId = stationId,
+            RegionId = areaId,
+            RegionName = areaId,
+            RegionOrder = 0,
+            Area = areaId,
+            StationName = logicContext.RadikoStationDic[stationId],
+            StationUrl = string.Empty,
+            LogoPath = string.Empty,
+            AreaFree = true,
+            TimeFree = true,
+            StationOrder = 0
+        });
+    }
+
+    await logicContext.DbContext.RadikoPrograms.AddAsync(new RadikoProgram
+    {
+        ProgramId = programId,
+        StationId = stationId,
+        Title = title,
+        RadioDate = start.ToRadioDate(),
+        DaysOfWeek = start.ToRadioDayOfWeek().ToDaysOfWeek(),
+        StartTime = start,
+        EndTime = end,
+        Performer = string.Empty,
+        Description = "canary realtime record",
+        AvailabilityTimeFree = AvailabilityTimeFree.Available,
+        ProgramUrl = string.Empty,
+        ImageUrl = string.Empty
+    });
+
+    await logicContext.DbContext.SaveChangesAsync();
+    return programId;
+}
+
+static async Task<string> SeedRadiruProgramForRealtimeRecordingAsync(
+    LogicContext logicContext,
+    string normalizedAreaId,
+    RadiruStationKind stationKind,
+    RadiruProgramJsonEntity sourceProgram,
+    int recordSeconds)
+{
+    var nowJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
+    var start = nowJst.AddSeconds(-2);
+    var end = nowJst.AddSeconds(recordSeconds);
+    var programId = $"canary-radiru-{stationKind.ServiceId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+
+    await logicContext.DbContext.NhkRadiruPrograms.AddAsync(new NhkRadiruProgram
+    {
+        ProgramId = programId,
+        StationId = stationKind.ServiceId,
+        AreaId = normalizedAreaId,
+        Title = sourceProgram.Name,
+        Subtitle = sourceProgram.IdentifierGroup.RadioEpisodeName ?? string.Empty,
+        RadioDate = start.ToRadioDate(),
+        DaysOfWeek = start.ToRadioDayOfWeek().ToDaysOfWeek(),
+        StartTime = start,
+        EndTime = end,
+        Performer = string.Empty,
+        Description = sourceProgram.Description ?? string.Empty,
+        SiteId = sourceProgram.IdentifierGroup.SiteId ?? string.Empty,
+        EventId = sourceProgram.About.Id ?? string.Empty,
+        ProgramUrl = sourceProgram.About.Url ?? string.Empty,
+        ImageUrl = sourceProgram.About.PartOfSeries.Logo.Medium.Url ?? string.Empty,
+        OnDemandContentUrl = null,
+        OnDemandExpiresAtUtc = null
+    });
+
+    await logicContext.DbContext.SaveChangesAsync();
+    return programId;
 }
 
 static async Task<CheckResult> CheckFfmpegAsync(string logPath)
@@ -451,6 +961,70 @@ static Dictionary<string, string> ParseArgs(string[] args)
 static string GetArg(Dictionary<string, string> map, string key, string defaultValue)
     => map.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : defaultValue;
 
+sealed class LogicContext(
+    ServiceProvider serviceProvider,
+    RadioDbContext dbContext,
+    ConcurrentDictionary<string, string> radikoStationDic,
+    RadikoUniqueProcessLogic radikoLogic,
+    RadikoApiClient radikoApiClient,
+    StationLobLogic stationLobLogic,
+    RadiruApiClient radiruApiClient,
+    ProgramScheduleLobLogic programScheduleLobLogic,
+    MediaTranscodeService mediaTranscodeService) : IDisposable
+{
+    public RadioDbContext DbContext { get; } = dbContext;
+    public ConcurrentDictionary<string, string> RadikoStationDic { get; } = radikoStationDic;
+    public RadikoUniqueProcessLogic RadikoLogic { get; } = radikoLogic;
+    public RadikoApiClient RadikoApiClient { get; } = radikoApiClient;
+    public StationLobLogic StationLobLogic { get; } = stationLobLogic;
+    public RadiruApiClient RadiruApiClient { get; } = radiruApiClient;
+    public ProgramScheduleLobLogic ProgramScheduleLobLogic { get; } = programScheduleLobLogic;
+    public MediaTranscodeService MediaTranscodeService { get; } = mediaTranscodeService;
+
+    public void Dispose()
+    {
+        DbContext.Dispose();
+        serviceProvider.Dispose();
+    }
+}
+
+sealed class InMemoryStationRepository : IStationRepository
+{
+    private readonly Dictionary<string, NhkRadiruStation> _radiruStations = new(StringComparer.OrdinalIgnoreCase);
+
+    public ValueTask<bool> HasAnyRadikoStationAsync(CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(false);
+
+    public ValueTask<List<RadikoStation>> GetRadikoStationsAsync(CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(new List<RadikoStation>());
+
+    public ValueTask AddRadikoStationsIfMissingAsync(IEnumerable<RadikoStation> stations, CancellationToken cancellationToken = default)
+        => ValueTask.CompletedTask;
+
+    public ValueTask<bool> HasAnyRadiruStationAsync(CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(_radiruStations.Count > 0);
+
+    public ValueTask UpsertRadiruStationsAsync(IEnumerable<NhkRadiruStation> stations, CancellationToken cancellationToken = default)
+    {
+        foreach (var station in stations)
+        {
+            _radiruStations[station.AreaId] = station;
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<NhkRadiruStation> GetRadiruStationByAreaAsync(string areaId, CancellationToken cancellationToken = default)
+    {
+        if (_radiruStations.TryGetValue(areaId, out var station))
+        {
+            return ValueTask.FromResult(station);
+        }
+
+        throw new InvalidOperationException($"Radiru station not found. areaId={areaId}");
+    }
+}
+
 file sealed class CanaryStatus
 {
     public required string Result { get; init; }
@@ -458,5 +1032,10 @@ file sealed class CanaryStatus
     public required string TimestampJst { get; init; }
     public required List<CheckResult> Checks { get; init; }
 }
+
+file sealed record ProgramSchemaIssue(string ProgramId, string Field, string Reason);
+file sealed record ProgramSchemaValidationResult(
+    IReadOnlyList<ProgramSchemaIssue> RequiredIssues,
+    IReadOnlyDictionary<string, int> OptionalMissingCounts);
 
 file sealed record CheckResult(string CheckId, string Result, string Message, string ErrorCode);
