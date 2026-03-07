@@ -135,7 +135,7 @@ jobs:
           rm -rf artifacts/recordings/*
 
       - name: Upload artifacts
-        if: always()
+        if: always() && (github.event_name == 'workflow_dispatch' || steps.run_canary.outputs.exit_code != '0')
         uses: actions/upload-artifact@v4
         with:
           name: canary-${{ github.run_id }}
@@ -143,7 +143,7 @@ jobs:
             results/status.json
             logs/**
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 3
 
       - name: Notify Discord on failure or warning
         if: always() && steps.run_canary.outputs.exit_code != '0' && env.DISCORD_WEBHOOK_URL != ''
