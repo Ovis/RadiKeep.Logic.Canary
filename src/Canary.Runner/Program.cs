@@ -105,6 +105,14 @@ try
         Path.Combine(logDir, "C003_RADIRU_REALTIME_RECORD.log"));
     checks.Add(c003Radiru);
 
+    var c005RadiruOnDemand = await CheckRadiruOnDemandRecordingAsync(
+        logicContext,
+        radiruAreaId,
+        radiruStationId,
+        recordOutputDir,
+        Path.Combine(logDir, "C005_RADIRU_ONDEMAND_RECORD.log"));
+    checks.Add(c005RadiruOnDemand);
+
     var overall = checks.All(c => c.Result == "PASS") ? "PASS" : "FAIL";
     var summary = new CanaryStatus
     {
@@ -903,6 +911,95 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
     }
 }
 
+static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
+    LogicContext logicContext,
+    string areaId,
+    string stationId,
+    string recordOutputDir,
+    string logPath)
+{
+    var log = new StringBuilder();
+    log.AppendLine($"check=C005_RADIRU_ONDEMAND area={areaId} station={stationId}");
+
+    try
+    {
+        var normalizedArea = NormalizeRadiruAreaKey(areaId);
+        var areaKind = Enum.GetValues<RadiruAreaKind>().First(x => x.GetEnumCodeId() == normalizedArea);
+        var stationKind = Enumeration.GetAll<RadiruStationKind>()
+            .FirstOrDefault(x => string.Equals(x.ServiceId, stationId, StringComparison.OrdinalIgnoreCase));
+        if (stationKind is null)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Radiru station kind not found.", "E-C005-RADIRU-STATION");
+        }
+
+        await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
+
+        var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
+        var candidate = await FindRadiruOnDemandCandidateAsync(logicContext, areaKind, stationKind, now);
+        if (candidate is null)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "No on-demand program candidate found.", "E-C005-RADIRU-NO-CANDIDATE");
+        }
+
+        var seededProgramId = await SeedRadiruProgramForOnDemandRecordingAsync(
+            logicContext,
+            normalizedArea,
+            stationKind,
+            candidate.Value.Program,
+            candidate.Value.OnDemandUrl,
+            candidate.Value.ExpiresAtUtc);
+        var command = new RecordingCommand(
+            RadioServiceKind.Radiru,
+            seededProgramId,
+            candidate.Value.Program.Name,
+            IsTimeFree: false,
+            StartDelaySeconds: 0,
+            EndDelaySeconds: 0,
+            IsOnDemand: true);
+        var source = new RadiruRecordingSource(
+            NullLogger<RadiruRecordingSource>.Instance,
+            logicContext.ProgramScheduleLobLogic,
+            logicContext.StationLobLogic);
+        var sourceResult = await source.PrepareAsync(command);
+
+        var outputPath = Path.Combine(recordOutputDir, $"radiru-ondemand-{normalizedArea}-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
+        var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
+
+        log.AppendLine($"ondemand_program={candidate.Value.Program.Name}");
+        log.AppendLine($"ondemand_program_start={candidate.Value.Program.StartDate:O}");
+        log.AppendLine($"ondemand_program_end={candidate.Value.Program.EndDate:O}");
+        log.AppendLine($"ondemand_expires_utc={candidate.Value.ExpiresAtUtc:O}");
+        log.AppendLine($"seed_program_id={seededProgramId}");
+        log.AppendLine($"output={outputPath}");
+        log.AppendLine($"logic_recorded={recorded}");
+
+        if (!recorded || !File.Exists(outputPath))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Radiru on-demand recording failed.", "E-C005-RADIRU-RECORD");
+        }
+
+        var bytes = new FileInfo(outputPath).Length;
+        if (bytes < 32 * 1024)
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", $"Recorded file too small: {bytes} bytes.", "E-C005-RADIRU-SIZE");
+        }
+
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "PASS", $"Radiru on-demand recording succeeded. bytes={bytes}", string.Empty);
+    }
+    catch (Exception ex)
+    {
+        log.AppendLine(ex.ToString());
+        await File.WriteAllTextAsync(logPath, log.ToString());
+        return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", $"Radiru on-demand check failed: {ex.Message}", "E-C005-RADIRU-EXCEPTION");
+    }
+}
+
 static async Task<(string StationId, string ProgramId, string Title)?> FindRadikoNowOnAirProgramAsync(LogicContext logicContext, string stationId, DateTimeOffset nowJst)
 {
     var programs = await logicContext.RadikoApiClient.GetWeeklyProgramsAsync(stationId);
@@ -954,6 +1051,107 @@ static async Task<(string ProgramId, string Title, DateTimeOffset StartTime, Dat
     }
 
     return (candidate.Program.ProgramId, candidate.Program.Title, candidate.StartJst, candidate.EndJst);
+}
+
+static async Task<(RadiruProgramJsonEntity Program, string OnDemandUrl, DateTime ExpiresAtUtc)?> FindRadiruOnDemandCandidateAsync(
+    LogicContext logicContext,
+    RadiruAreaKind areaKind,
+    RadiruStationKind stationKind,
+    DateTimeOffset nowJst)
+{
+    var targetDates = new[]
+    {
+        nowJst,
+        nowJst.AddDays(-1)
+    };
+
+    var candidates = new List<(RadiruProgramJsonEntity Program, string OnDemandUrl, DateTime ExpiresAtUtc)>();
+
+    foreach (var targetDate in targetDates)
+    {
+        var programs = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaKind, stationKind, targetDate);
+        foreach (var program in programs)
+        {
+            if (program.StartDate == default || program.EndDate == default || program.EndDate <= program.StartDate)
+            {
+                continue;
+            }
+
+            if (program.EndDate > nowJst)
+            {
+                continue;
+            }
+
+            var onDemandUrl = SelectRadiruOnDemandContentUrl(program);
+            if (string.IsNullOrWhiteSpace(onDemandUrl))
+            {
+                continue;
+            }
+
+            var expiresAtUtc = program.About.Audio.Expires == default
+                ? DateTime.MinValue
+                : program.About.Audio.Expires.UtcDateTime;
+            if (expiresAtUtc <= DateTime.UtcNow)
+            {
+                continue;
+            }
+
+            candidates.Add((program, onDemandUrl, expiresAtUtc));
+        }
+    }
+
+    if (candidates.Count == 0)
+    {
+        return null;
+    }
+
+    return candidates
+        .OrderBy(x => x.Program.EndDate - x.Program.StartDate)
+        .ThenByDescending(x => x.Program.EndDate)
+        .First();
+}
+
+static string? SelectRadiruOnDemandContentUrl(RadiruProgramJsonEntity program)
+{
+    var detailedContents = program.About.Audio.DetailedContent
+        .Where(d => !string.IsNullOrWhiteSpace(d.ContentUrl))
+        .ToList();
+    if (detailedContents.Count == 0)
+    {
+        return null;
+    }
+
+    var prioritized = detailedContents.FirstOrDefault(d =>
+        string.Equals(d.Name, "hls_widevine", StringComparison.OrdinalIgnoreCase) &&
+        IsM3u8Url(d.ContentUrl));
+    if (prioritized is not null)
+    {
+        return prioritized.ContentUrl;
+    }
+
+    var fallback = detailedContents.FirstOrDefault(d => IsM3u8Url(d.ContentUrl));
+    return fallback?.ContentUrl;
+}
+
+static bool IsM3u8Url(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return false;
+    }
+
+    if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+    {
+        return false;
+    }
+
+    if (!uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+        !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+    {
+        return false;
+    }
+
+    return uri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
 }
 
 static string GetProgramDataLogPath(string logPath)
@@ -1119,6 +1317,41 @@ static async Task<string> SeedRadiruProgramForRealtimeRecordingAsync(
         ImageUrl = sourceProgram.About.PartOfSeries.Logo.Medium.Url ?? string.Empty,
         OnDemandContentUrl = null,
         OnDemandExpiresAtUtc = null
+    });
+
+    await logicContext.DbContext.SaveChangesAsync();
+    return programId;
+}
+
+static async Task<string> SeedRadiruProgramForOnDemandRecordingAsync(
+    LogicContext logicContext,
+    string normalizedAreaId,
+    RadiruStationKind stationKind,
+    RadiruProgramJsonEntity sourceProgram,
+    string onDemandContentUrl,
+    DateTime onDemandExpiresAtUtc)
+{
+    var programId = $"canary-radiru-ondemand-{stationKind.ServiceId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+
+    await logicContext.DbContext.NhkRadiruPrograms.AddAsync(new NhkRadiruProgram
+    {
+        ProgramId = programId,
+        StationId = stationKind.ServiceId,
+        AreaId = normalizedAreaId,
+        Title = sourceProgram.Name,
+        Subtitle = sourceProgram.IdentifierGroup.RadioEpisodeName ?? string.Empty,
+        RadioDate = sourceProgram.StartDate.ToRadioDate(),
+        DaysOfWeek = sourceProgram.StartDate.ToRadioDayOfWeek().ToDaysOfWeek(),
+        StartTime = sourceProgram.StartDate,
+        EndTime = sourceProgram.EndDate,
+        Performer = string.Empty,
+        Description = sourceProgram.Description ?? string.Empty,
+        SiteId = sourceProgram.IdentifierGroup.SiteId ?? string.Empty,
+        EventId = sourceProgram.About.Id ?? string.Empty,
+        ProgramUrl = sourceProgram.About.Url ?? string.Empty,
+        ImageUrl = sourceProgram.About.PartOfSeries.Logo.Medium.Url ?? string.Empty,
+        OnDemandContentUrl = onDemandContentUrl,
+        OnDemandExpiresAtUtc = onDemandExpiresAtUtc
     });
 
     await logicContext.DbContext.SaveChangesAsync();
