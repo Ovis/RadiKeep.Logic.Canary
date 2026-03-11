@@ -248,8 +248,12 @@ static async Task<CheckResult> CheckRadiruDailyFetchAsync(
 
     try
     {
-        var areaKind = Enum.GetValues<RadiruAreaKind>()
-            .FirstOrDefault(x => x.GetEnumCodeId() == normalizedAreaKey);
+        if (!Enum.GetValues<RadiruAreaKind>().Any(x => x.GetEnumCodeId() == normalizedAreaKey))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C002_RADIRU_DAILY_FETCH", "FAIL", "Unknown radiru area.", "E-C002-SCHEMA");
+        }
+
         var stationKind = Enumeration.GetAll<RadiruStationKind>()
             .FirstOrDefault(x => string.Equals(x.ServiceId, stationId, StringComparison.OrdinalIgnoreCase));
         if (stationKind is null)
@@ -261,7 +265,7 @@ static async Task<CheckResult> CheckRadiruDailyFetchAsync(
         await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
 
         var targetDate = new DateTimeOffset(dateJst, ResolveJapanTimeZone().GetUtcOffset(dateJst));
-        var publications = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaKind, stationKind, targetDate);
+        var publications = await logicContext.RadiruApiClient.GetDailyProgramsAsync(normalizedAreaKey, stationKind.ServiceId, targetDate);
         var programDataPath = GetProgramDataLogPath(logPath);
         await WriteJsonLogAsync(programDataPath, publications);
 
@@ -870,7 +874,12 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
     try
     {
         var normalizedArea = NormalizeRadiruAreaKey(areaId);
-        var areaKind = Enum.GetValues<RadiruAreaKind>().First(x => x.GetEnumCodeId() == normalizedArea);
+        if (!Enum.GetValues<RadiruAreaKind>().Any(x => x.GetEnumCodeId() == normalizedArea))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru area kind not found.", "E-C003-RECORD-EXEC");
+        }
+
         var stationKind = Enumeration.GetAll<RadiruStationKind>()
             .FirstOrDefault(x => string.Equals(x.ServiceId, stationId, StringComparison.OrdinalIgnoreCase));
         if (stationKind is null)
@@ -881,7 +890,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
 
         await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
         var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
-        var programs = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaKind, stationKind, now);
+        var programs = await logicContext.RadiruApiClient.GetDailyProgramsAsync(normalizedArea, stationKind.ServiceId, now);
         var onAirProgram = programs.FirstOrDefault(p => now >= p.StartDate && now <= p.EndDate);
 
         if (onAirProgram is null)
@@ -956,7 +965,12 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
     try
     {
         var normalizedArea = NormalizeRadiruAreaKey(areaId);
-        var areaKind = Enum.GetValues<RadiruAreaKind>().First(x => x.GetEnumCodeId() == normalizedArea);
+        if (!Enum.GetValues<RadiruAreaKind>().Any(x => x.GetEnumCodeId() == normalizedArea))
+        {
+            await File.WriteAllTextAsync(logPath, log.ToString());
+            return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru area kind not found.", "E-C003-RECORD-EXEC");
+        }
+
         var stationKind = Enumeration.GetAll<RadiruStationKind>()
             .FirstOrDefault(x => string.Equals(x.ServiceId, stationId, StringComparison.OrdinalIgnoreCase));
         if (stationKind is null)
@@ -968,7 +982,7 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
         await logicContext.StationLobLogic.UpdateRadiruStationInformationAsync();
 
         var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone());
-        var selection = await FindRadiruOnDemandCandidateAsync(logicContext, areaKind, stationKind, now);
+        var selection = await FindRadiruOnDemandCandidateAsync(logicContext, normalizedArea, stationKind, now);
         if (selection.Candidate is null)
         {
             await File.WriteAllTextAsync(logPath, log.ToString());
@@ -1099,7 +1113,7 @@ static async Task<(string ProgramId, string Title, DateTimeOffset StartTime, Dat
 
 static async Task<(RadiruOnDemandCandidate? Candidate, bool HasExpiredCandidate)> FindRadiruOnDemandCandidateAsync(
     LogicContext logicContext,
-    RadiruAreaKind areaKind,
+    string areaId,
     RadiruStationKind stationKind,
     DateTimeOffset nowJst)
 {
@@ -1114,7 +1128,7 @@ static async Task<(RadiruOnDemandCandidate? Candidate, bool HasExpiredCandidate)
 
     foreach (var targetDate in targetDates)
     {
-        var programs = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaKind, stationKind, targetDate);
+        var programs = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaId, stationKind.ServiceId, targetDate);
         foreach (var program in programs)
         {
             if (program.StartDate == default || program.EndDate == default || program.EndDate <= program.StartDate)
@@ -1538,7 +1552,8 @@ sealed class LogicContext(
 
 sealed class InMemoryStationRepository : IStationRepository
 {
-    private readonly Dictionary<string, NhkRadiruStation> _radiruStations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, NhkRadiruArea> _radiruAreas = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, NhkRadiruAreaService> _radiruAreaServices = new(StringComparer.OrdinalIgnoreCase);
 
     public ValueTask<bool> HasAnyRadikoStationAsync(CancellationToken cancellationToken = default)
         => ValueTask.FromResult(false);
@@ -1550,29 +1565,73 @@ sealed class InMemoryStationRepository : IStationRepository
         => ValueTask.CompletedTask;
 
     public ValueTask<bool> HasAnyRadiruStationAsync(CancellationToken cancellationToken = default)
-        => ValueTask.FromResult(_radiruStations.Count > 0);
+        => ValueTask.FromResult(_radiruAreaServices.Count > 0);
 
-    public ValueTask UpsertRadiruStationsAsync(IEnumerable<NhkRadiruStation> stations, CancellationToken cancellationToken = default)
+    public ValueTask<string?> GetRadiruHlsUrlByAreaAndServiceAsync(string areaId, string serviceId, CancellationToken cancellationToken = default)
     {
-        foreach (var station in stations)
+        var key = $"{areaId}:{serviceId}";
+        if (_radiruAreaServices.TryGetValue(key, out var service))
         {
-            _radiruStations[station.AreaId] = station;
+            return ValueTask.FromResult<string?>(service.HlsUrl);
+        }
+
+        return ValueTask.FromResult<string?>(null);
+    }
+
+    public ValueTask<List<RadiruStationEntry>> GetRadiruStationsFromAreaServicesAsync(CancellationToken cancellationToken = default)
+    {
+        var entries = _radiruAreaServices.Values
+            .Where(x => x.IsActive)
+            .Select(x => new RadiruStationEntry
+            {
+                AreaId = x.AreaId,
+                AreaName = _radiruAreas.TryGetValue(x.AreaId, out var area) ? area.AreaJpName : x.AreaId,
+                StationId = x.ServiceId,
+                StationName = x.ServiceName
+            })
+            .ToList();
+
+        return ValueTask.FromResult(entries);
+    }
+
+    public ValueTask UpsertRadiruAreasAndServicesAsync(
+        IEnumerable<NhkRadiruArea> areas,
+        IEnumerable<NhkRadiruAreaService> services,
+        CancellationToken cancellationToken = default)
+    {
+        var areaList = areas.ToList();
+        foreach (var area in areaList)
+        {
+            _radiruAreas[area.AreaId] = area;
+        }
+
+        var targetAreaIds = areaList.Select(x => x.AreaId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in _radiruAreaServices.Keys.Where(key => targetAreaIds.Contains(key.Split(':')[0])).ToList())
+        {
+            _radiruAreaServices.Remove(key);
+        }
+
+        foreach (var service in services)
+        {
+            _radiruAreaServices[$"{service.AreaId}:{service.ServiceId}"] = service;
         }
 
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask<NhkRadiruStation> GetRadiruStationByAreaAsync(string areaId, CancellationToken cancellationToken = default)
-    {
-        if (_radiruStations.TryGetValue(areaId, out var station))
-        {
-            return ValueTask.FromResult(station);
-        }
+    public ValueTask<List<(string AreaId, string ServiceId)>> GetActiveRadiruAreaServiceKeysAsync(CancellationToken cancellationToken = default)
+        => ValueTask.FromResult(
+            _radiruAreaServices.Values
+                .Where(x => x.IsActive)
+                .Select(x => (x.AreaId, x.ServiceId))
+                .ToList());
 
-        throw new InvalidOperationException($"Radiru station not found. areaId={areaId}");
+    public ValueTask<NhkRadiruArea?> GetRadiruAreaByAreaIdAsync(string areaId, CancellationToken cancellationToken = default)
+    {
+        _radiruAreas.TryGetValue(areaId, out var area);
+        return ValueTask.FromResult(area);
     }
 }
-
 file sealed class CanaryStatus
 {
     public required string Result { get; init; }
@@ -1592,3 +1651,4 @@ file sealed record ProgramSchemaValidationResult(
     IReadOnlyDictionary<string, int> OptionalMissingCounts);
 
 file sealed record CheckResult(string CheckId, string Result, string Message, string ErrorCode);
+
