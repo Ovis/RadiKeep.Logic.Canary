@@ -34,6 +34,10 @@ RadiKeep が依存する外部サービス変更を検知する Canary 実行リ
 git submodule update --init --recursive
 ```
 
+補足:
+- GitHub Actions の Canary Workflow は実行ごとに `vendor/RadiKeep` を `main` の最新HEADへ更新してから実行する。
+- ローカル実行は手元の submodule checkout をそのまま使う。最新 `main` で試す場合は `git submodule update --remote vendor/RadiKeep` を先に実行する。
+
 2. 必要な Secrets 設定
 - Tailscale
   - `TS_OAUTH_CLIENT_ID`

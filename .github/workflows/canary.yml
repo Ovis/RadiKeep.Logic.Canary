@@ -54,6 +54,16 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Track latest RadiKeep main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive --remote --depth 1
+          radikeep_sha="$(git -C vendor/RadiKeep rev-parse HEAD)"
+          echo "RADIKEEP_SUBMODULE_SHA=${radikeep_sha}" >> "${GITHUB_ENV}"
+          echo "RadiKeep submodule revision: ${radikeep_sha}"
+
       - name: Validate Tailscale secrets
         shell: bash
         run: |
@@ -167,6 +177,7 @@ jobs:
               f"repo: {os.getenv('GITHUB_REPOSITORY', '')}\n"
               f"run: #{os.getenv('GITHUB_RUN_NUMBER', '')}\n"
               f"ref: {os.getenv('GITHUB_REF_NAME', '')}\n"
+              f"radiKeepMain: {os.getenv('RADIKEEP_SUBMODULE_SHA', '')}\n"
               f"url: https://github.com/{os.getenv('GITHUB_REPOSITORY', '')}/actions/runs/{os.getenv('GITHUB_RUN_ID', '')}\n"
               f"summary: {summary[:1500]}"
           )

@@ -112,6 +112,7 @@ RadiKeep.Logic.Canary/
 
 ## 10. 運用
 
-- submodule は固定コミットで参照し、Canary結果の再現性を確保する。
-- RadiKeep 側更新時は submodule 更新PRで追従し、`Canary.Runner` のビルド確認を行う。
+- GitHub Actions の Canary Workflow では `vendor/RadiKeep` を実行時に `main` の最新HEADへ更新し、その時点の `RadiKeep.Logics` を検証対象にする。
+- ローカルでは固定コミットの submodule を使って再現確認できるようにし、必要に応じて `git submodule update --remote vendor/RadiKeep` で最新 `main` を取り込む。
+- `RadiKeep.Logics` の公開IF変更で `Canary.Runner` が追従を要する場合があるため、submodule 更新時は Runner 側ビルド確認も行う。
 - 障害時は `results/status.json` と `logs` を一次情報として調査する。
