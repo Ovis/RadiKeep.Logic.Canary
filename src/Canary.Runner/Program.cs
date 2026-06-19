@@ -53,6 +53,14 @@ Directory.CreateDirectory(logDir);
 Directory.CreateDirectory(recordOutputDir);
 
 var checks = new List<CheckResult>();
+var summary = new CanaryStatus
+{
+    Result = "FAIL",
+    Message = "Canary execution did not complete.",
+    TimestampJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone()).ToString("O"),
+    Checks = checks
+};
+var exitCode = 2;
 
 try
 {
@@ -118,7 +126,7 @@ try
         : checks.Any(c => c.Result == "WARN")
             ? "WARN"
             : "PASS";
-    var summary = new CanaryStatus
+    summary = new CanaryStatus
     {
         Result = overall,
         Message = overall switch
@@ -131,8 +139,7 @@ try
         Checks = checks
     };
 
-    await WriteStatusAsync(statusPath, summary);
-    return overall switch
+    exitCode = overall switch
     {
         "PASS" => 0,
         "WARN" => 1,
@@ -142,18 +149,19 @@ try
 catch (Exception ex)
 {
     checks.Add(new CheckResult("C999_UNHANDLED_EXCEPTION", "FAIL", $"Unhandled exception: {ex.Message}", "E-C999-UNHANDLED"));
+    await TryWriteTextFileAsync(Path.Combine(logDir, "C999_UNHANDLED_EXCEPTION.log"), ex.ToString());
 
-    var summary = new CanaryStatus
+    summary = new CanaryStatus
     {
         Result = "FAIL",
         Message = "Unhandled exception occurred.",
-        TimestampJst = DateTimeOffset.UtcNow.ToString("O"),
+        TimestampJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone()).ToString("O"),
         Checks = checks
     };
-
-    await WriteStatusAsync(statusPath, summary);
-    return 2;
 }
+
+await PersistStatusWithFallbackAsync(statusPath, summary, logDir);
+return exitCode;
 
 static TimeZoneInfo ResolveJapanTimeZone()
 {
@@ -579,6 +587,7 @@ static LogicContext CreateLogicContext(string radikoUserId, string radikoPasswor
         programScheduleLobLogic,
         localApplicationUrlService,
         radikoProxyTicketService,
+        logRoot,
         mediaTranscodeService);
 }
 
@@ -629,6 +638,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
 {
     var log = new StringBuilder();
     log.AppendLine($"check=C003_RADIKO preferred_station={preferredStationId} seconds={recordSeconds}");
+    HashSet<string>? ffmpegLogSnapshot = null;
 
     try
     {
@@ -702,6 +712,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
 
         var outputPath = Path.Combine(recordOutputDir, $"radiko-realtime-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
         var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        ffmpegLogSnapshot = CaptureFfmpegLogSnapshot(logicContext.FfmpegLogDirectory);
         var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
 
         log.AppendLine($"selected_station={stationId}");
@@ -712,6 +723,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
 
         if (!recorded)
         {
+            await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C003_RADIKO_REALTIME_RECORD");
             await File.WriteAllTextAsync(logPath, log.ToString());
             return new CheckResult("C003_RADIKO_REALTIME_RECORD", "FAIL", "radiko realtime recording failed.", "E-C003-RECORD-EXEC");
         }
@@ -735,6 +747,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
     catch (Exception ex)
     {
         log.AppendLine(ex.ToString());
+        await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C003_RADIKO_REALTIME_RECORD");
         await File.WriteAllTextAsync(logPath, log.ToString());
         return CreateFailureResult("C003_RADIKO_REALTIME_RECORD", "E-C003-RECORD-EXEC", $"radiko realtime check failed: {ex.Message}", ex);
     }
@@ -749,6 +762,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
 {
     var log = new StringBuilder();
     log.AppendLine($"check=C004_RADIKO_TIMEFREE preferred_station={preferredStationId} seconds={recordSeconds}");
+    HashSet<string>? ffmpegLogSnapshot = null;
 
     try
     {
@@ -829,6 +843,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
 
         var outputPath = Path.Combine(recordOutputDir, $"radiko-timefree-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
         var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        ffmpegLogSnapshot = CaptureFfmpegLogSnapshot(logicContext.FfmpegLogDirectory);
         var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
 
         log.AppendLine($"selected_station={stationId}");
@@ -841,6 +856,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
 
         if (!recorded)
         {
+            await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C004_RADIKO_TIMEFREE_RECORD");
             await File.WriteAllTextAsync(logPath, log.ToString());
             return new CheckResult("C004_RADIKO_TIMEFREE_RECORD", "FAIL", "radiko timefree recording failed.", "E-C004-RECORD-EXEC");
         }
@@ -864,6 +880,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
     catch (Exception ex)
     {
         log.AppendLine(ex.ToString());
+        await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C004_RADIKO_TIMEFREE_RECORD");
         await File.WriteAllTextAsync(logPath, log.ToString());
         return CreateFailureResult("C004_RADIKO_TIMEFREE_RECORD", "E-C004-RECORD-EXEC", $"radiko timefree check failed: {ex.Message}", ex);
     }
@@ -879,6 +896,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
 {
     var log = new StringBuilder();
     log.AppendLine($"check=C003_RADIRU area={areaId} station={stationId} seconds={recordSeconds}");
+    HashSet<string>? ffmpegLogSnapshot = null;
 
     try
     {
@@ -924,6 +942,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
 
         var outputPath = Path.Combine(recordOutputDir, $"radiru-realtime-{normalizedArea}-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
         var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        ffmpegLogSnapshot = CaptureFfmpegLogSnapshot(logicContext.FfmpegLogDirectory);
         var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
 
         log.AppendLine($"onair_program={onAirProgram.Name}");
@@ -933,6 +952,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
 
         if (!recorded)
         {
+            await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C003_RADIRU_REALTIME_RECORD");
             await File.WriteAllTextAsync(logPath, log.ToString());
             return new CheckResult("C003_RADIRU_REALTIME_RECORD", "FAIL", "Radiru realtime recording failed.", "E-C003-RECORD-EXEC");
         }
@@ -956,6 +976,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
     catch (Exception ex)
     {
         log.AppendLine(ex.ToString());
+        await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C003_RADIRU_REALTIME_RECORD");
         await File.WriteAllTextAsync(logPath, log.ToString());
         return CreateFailureResult("C003_RADIRU_REALTIME_RECORD", "E-C003-RECORD-EXEC", $"Radiru realtime check failed: {ex.Message}", ex);
     }
@@ -970,6 +991,7 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
 {
     var log = new StringBuilder();
     log.AppendLine($"check=C005_RADIRU_ONDEMAND area={areaId} station={stationId}");
+    HashSet<string>? ffmpegLogSnapshot = null;
 
     try
     {
@@ -1027,6 +1049,7 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
 
         var outputPath = Path.Combine(recordOutputDir, $"radiru-ondemand-{normalizedArea}-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
         var mediaPath = new MediaPath(outputPath, outputPath, Path.GetFileName(outputPath));
+        ffmpegLogSnapshot = CaptureFfmpegLogSnapshot(logicContext.FfmpegLogDirectory);
         var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
 
         log.AppendLine($"ondemand_program={candidate.Program.Name}");
@@ -1039,6 +1062,7 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
 
         if (!recorded)
         {
+            await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C005_RADIRU_ONDEMAND_RECORD");
             await File.WriteAllTextAsync(logPath, log.ToString());
             return new CheckResult("C005_RADIRU_ONDEMAND_RECORD", "FAIL", "Radiru on-demand recording failed.", "E-C005-RECORD-EXEC");
         }
@@ -1062,6 +1086,7 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
     catch (Exception ex)
     {
         log.AppendLine(ex.ToString());
+        await AppendNewFfmpegLogsAsync(log, ffmpegLogSnapshot, logicContext.FfmpegLogDirectory, logPath, "C005_RADIRU_ONDEMAND_RECORD");
         await File.WriteAllTextAsync(logPath, log.ToString());
         return CreateFailureResult("C005_RADIRU_ONDEMAND_RECORD", "E-C005-RECORD-EXEC", $"Radiru on-demand check failed: {ex.Message}", ex);
     }
@@ -1504,8 +1529,124 @@ static async Task<CheckResult> CheckFfmpegAsync(string logPath)
 
 static async Task WriteStatusAsync(string path, CanaryStatus status)
 {
-    var json = JsonSerializer.Serialize(status, new JsonSerializerOptions { WriteIndented = true });
+    var json = SerializeStatus(status);
     await File.WriteAllTextAsync(path, json);
+}
+
+static async Task PersistStatusWithFallbackAsync(string primaryPath, CanaryStatus status, string logDir)
+{
+    try
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(primaryPath) ?? ".");
+        await WriteStatusAsync(primaryPath, status);
+    }
+    catch (Exception ex)
+    {
+        var fallbackDir = string.IsNullOrWhiteSpace(logDir) ? "." : logDir;
+        Directory.CreateDirectory(fallbackDir);
+
+        var fallbackStatusPath = Path.Combine(fallbackDir, Path.GetFileName(primaryPath));
+        var fallbackLogPath = Path.Combine(fallbackDir, "C998_STATUS_WRITE_FAILURE.log");
+        var payload = SerializeStatus(status);
+
+        var diagnostic = new StringBuilder();
+        diagnostic.AppendLine($"primary_status_path={primaryPath}");
+        diagnostic.AppendLine($"fallback_status_path={fallbackStatusPath}");
+        diagnostic.AppendLine(ex.ToString());
+
+        await TryWriteTextFileAsync(fallbackLogPath, diagnostic.ToString());
+        await TryWriteTextFileAsync(fallbackStatusPath, payload);
+        Console.Error.WriteLine($"Failed to write status file to '{primaryPath}'. Fallback written to '{fallbackStatusPath}'.");
+    }
+}
+
+static async Task TryWriteTextFileAsync(string path, string content)
+{
+    try
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+        await File.WriteAllTextAsync(path, content);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Failed to write file '{path}': {ex}");
+    }
+}
+
+static string SerializeStatus(CanaryStatus status)
+    => JsonSerializer.Serialize(status, new JsonSerializerOptions { WriteIndented = true });
+
+static HashSet<string> CaptureFfmpegLogSnapshot(string directory)
+{
+    if (!Directory.Exists(directory))
+    {
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    return Directory.EnumerateFiles(directory, "*.log", SearchOption.TopDirectoryOnly)
+        .Select(Path.GetFullPath)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+}
+
+static async Task AppendNewFfmpegLogsAsync(
+    StringBuilder log,
+    HashSet<string>? previousSnapshot,
+    string sourceDirectory,
+    string checkLogPath,
+    string checkId)
+{
+    if (previousSnapshot is null)
+    {
+        log.AppendLine("ffmpeg_logs=recording_not_started");
+        return;
+    }
+
+    if (!Directory.Exists(sourceDirectory))
+    {
+        log.AppendLine("ffmpeg_logs=source_directory_missing");
+        return;
+    }
+
+    var artifactLogDirectory = Path.GetDirectoryName(checkLogPath) ?? ".";
+    Directory.CreateDirectory(artifactLogDirectory);
+
+    var copied = new List<string>();
+    foreach (var sourcePath in Directory.EnumerateFiles(sourceDirectory, "*.log", SearchOption.TopDirectoryOnly)
+                 .Select(Path.GetFullPath)
+                 .Where(path => !previousSnapshot.Contains(path))
+                 .OrderBy(File.GetLastWriteTimeUtc))
+    {
+        var destinationPath = BuildCopiedFfmpegLogPath(artifactLogDirectory, checkId, sourcePath);
+        File.Copy(sourcePath, destinationPath, overwrite: false);
+        copied.Add(destinationPath);
+    }
+
+    if (copied.Count == 0)
+    {
+        log.AppendLine("ffmpeg_logs=none");
+        return;
+    }
+
+    foreach (var copiedPath in copied)
+    {
+        log.AppendLine($"ffmpeg_log={Path.GetFileName(copiedPath)}");
+    }
+
+    await Task.CompletedTask;
+}
+
+static string BuildCopiedFfmpegLogPath(string artifactLogDirectory, string checkId, string sourcePath)
+{
+    var fileName = $"{checkId}_ffmpeg_{Path.GetFileName(sourcePath)}";
+    var destinationPath = Path.Combine(artifactLogDirectory, fileName);
+    if (!File.Exists(destinationPath))
+    {
+        return destinationPath;
+    }
+
+    return Path.Combine(
+        artifactLogDirectory,
+        $"{checkId}_ffmpeg_{Path.GetFileNameWithoutExtension(sourcePath)}_{Guid.NewGuid():N}{Path.GetExtension(sourcePath)}");
 }
 
 static Dictionary<string, string> ParseArgs(string[] args)
@@ -1543,6 +1684,7 @@ sealed class LogicContext(
     ProgramScheduleLobLogic programScheduleLobLogic,
     ILocalApplicationUrlService localApplicationUrlService,
     IRadikoProxyTicketService radikoProxyTicketService,
+    string ffmpegLogDirectory,
     MediaTranscodeService mediaTranscodeService) : IDisposable
 {
     public RadioDbContext DbContext { get; } = dbContext;
@@ -1554,6 +1696,7 @@ sealed class LogicContext(
     public ProgramScheduleLobLogic ProgramScheduleLobLogic { get; } = programScheduleLobLogic;
     public ILocalApplicationUrlService LocalApplicationUrlService { get; } = localApplicationUrlService;
     public IRadikoProxyTicketService RadikoProxyTicketService { get; } = radikoProxyTicketService;
+    public string FfmpegLogDirectory { get; } = ffmpegLogDirectory;
     public MediaTranscodeService MediaTranscodeService { get; } = mediaTranscodeService;
 
     public void Dispose()
