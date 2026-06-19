@@ -1,25 +1,25 @@
-# RadiKeep Canary 判定仕様（現行）
+# RadiKeep Canary 判定仕様
 
 ## 1. 対象
 
-- 本仕様は、別リポジトリ `radikeep-canary` で実行する Canary ジョブの判定ルールを定義する。
+- 本仕様は、別リポジトリ `RadiKeep.Logic.Canary` で実行する Canary ジョブの判定ルールを定義する。
 - 実行環境は GitHub-hosted runner（`ubuntu-latest`）+ Tailscale Exit Node を前提とする。
 
 ## 2. 共通ルール
 
-## 2.1 実行結果ステータス
+### 2.1 実行結果ステータス
 
 - `PASS`: すべての必須判定を満たした
 - `WARN`: 一時的要因の可能性がある失敗
 - `FAIL`: 仕様変更または継続的障害の可能性が高い失敗
 
-## 2.2 WARN 判定ルール
+### 2.2 WARN 判定ルール
 
 - 一時的通信障害（タイムアウト、DNS、接続失敗等）は `WARN` とする。
 - それ以外の失敗は `FAIL` とする。
 - 現行実装ではチェック単位の自動再試行は行わない。
 
-## 2.3 成果物
+### 2.3 成果物
 
 - `results/status.json`
   - ジョブ全体結果、各チェックの結果、失敗コード、メッセージ
@@ -27,10 +27,10 @@
   - チェック単位の詳細ログ
 - `logs/<check-id>_programs.json`
   - C001/C002 の取得番組表データ
-- `artifacts/` へのアップロード対象
+- Artifact アップロード対象
   - `results/status.json`
   - `logs/**`
-  - 録音ファイルは著作権配慮のためアップロード前に削除
+  - 録音ファイルはアップロードしない
 - Artifact アップロード条件
   - `workflow_dispatch`: 成功/失敗に関わらずアップロード
   - `schedule`: WARN/FAIL時のみアップロード
@@ -39,55 +39,73 @@
 ## 3. 入力パラメータ
 
 - `RADIKO_STATION_ID`（例: `TBS`）
-- `RADIRU_AREA_ID`（例: `JP13`）
+- `RADIRU_AREA_ID`（例: `JP13` または `130`）
 - `RADIRU_STATION_ID`（例: `r1`）
 - `REALTIME_RECORD_SECONDS`（例: `30`）
 - `TIMEFREE_RECORD_SECONDS`（例: `30`）
-- `RADIKO_USER_ID` / `RADIKO_PASSWORD`（必要時）
+- `RADIKO_USER_ID` / `RADIKO_PASSWORD`
 - `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` / `TS_EXIT_NODE`
 
 ## 4. チェック一覧
 
-## 4.1 C001: radiko 1日分番組表取得
+### 4.1 C001: radiko 1日分番組表取得
 
 - ID: `C001_RADIKO_DAILY_FETCH`
 - 目的: radiko の番組表取得API変更を検知する
 - 入力: `RADIKO_STATION_ID`, 実行日の JST 日付
 - 手順:
-  - 対象局の 1 日分番組表を取得
+  - 対象局の 1 日分番組表を取得する
 - 判定:
   - 応答取得成功
   - 番組件数 > 0
-  - 各番組で必須項目（`ProgramId`, `StartTime`, `EndTime`, `Title`）が存在
+  - 各番組で必須項目（`ProgramId`, `StationId`, `Title`, `StartTime`, `EndTime`）が存在する
+  - `ProgramId` が重複しない
+  - `EndTime > StartTime`
+- optionalログ対象:
+  - `Performer`
+  - `Description`
+  - `ProgramUrl`
+  - `ImageUrl`
 - 失敗コード:
   - `E-C001-NETWORK`
   - `E-C001-EMPTY`
   - `E-C001-SCHEMA`
 
-## 4.2 C002: らじる 1日分番組表取得
+### 4.2 C002: らじる 1日分番組表取得
 
 - ID: `C002_RADIRU_DAILY_FETCH`
 - 目的: らじる★らじる番組表API変更を検知する
 - 入力: `RADIRU_AREA_ID`, `RADIRU_STATION_ID`, 実行日の JST 日付
 - 手順:
-  - 対象エリア・局の 1 日分番組表を取得
+  - `StationLobLogic.UpdateRadiruStationInformationAsync()` で最新定義を取得する
+  - 対象エリア・局の 1 日分番組表を取得する
 - 判定:
   - 応答取得成功
   - 番組件数 > 0
-  - 各番組で必須項目（`ProgramId`, `StartTime`, `EndTime`, `Title`）が存在
+  - 各番組で必須項目（`Id`, `Name`, `StartDate`, `EndDate`）が存在する
+  - `Id` が重複しない
+  - `EndDate > StartDate`
+- optionalログ対象:
+  - `Description`
+  - `Url`
+  - `IdentifierGroup.ServiceId`
+  - `IdentifierGroup.AreaId`
+  - `IdentifierGroup.RadioEpisodeName`
+  - `About.Url`
+  - `About.PartOfSeries.Logo.Medium.Url`
 - 失敗コード:
   - `E-C002-NETWORK`
   - `E-C002-EMPTY`
   - `E-C002-SCHEMA`
 
-## 4.3 C003(radiko): リアルタイム録音検証
+### 4.3 C003(radiko): リアルタイム録音検証
 
 - ID: `C003_RADIKO_REALTIME_RECORD`
 - 目的: 現在放送中番組の録音経路が正常か検証する
 - 入力: `REALTIME_RECORD_SECONDS`
 - 手順:
-  - 対象局（必要に応じて現在エリア局へフォールバック）から放送中番組を 1 件選択
-  - 指定秒数のみ録音実行
+  - 対象局から放送中番組を 1 件選択する
+  - 指定秒数のみ録音実行する
 - 判定:
   - 録音処理成功
   - 出力ファイル生成
@@ -98,14 +116,15 @@
   - `E-C003-OUTPUT-MISSING`
   - `E-C003-OUTPUT-TOO-SMALL`
 
-## 4.4 C003(らじる): リアルタイム録音検証
+### 4.4 C003(らじる): リアルタイム録音検証
 
 - ID: `C003_RADIRU_REALTIME_RECORD`
 - 目的: 現在放送中番組の録音経路が正常か検証する
 - 入力: `REALTIME_RECORD_SECONDS`
 - 手順:
-  - 対象エリア・局の放送中番組を 1 件選択
-  - 指定秒数のみ録音実行
+  - 最新のエリア/サービス定義を取得する
+  - 対象エリア・局の放送中番組を 1 件選択する
+  - 指定秒数のみ録音実行する
 - 判定:
   - 録音処理成功
   - 出力ファイル生成
@@ -116,14 +135,14 @@
   - `E-C003-OUTPUT-MISSING`
   - `E-C003-OUTPUT-TOO-SMALL`
 
-## 4.5 C004: radiko タイムフリー録音検証
+### 4.5 C004: radiko タイムフリー録音検証
 
 - ID: `C004_RADIKO_TIMEFREE_RECORD`
 - 目的: radiko タイムフリー録音経路の健全性を検知する
-- 入力: `TIMEFREE_RECORD_SECONDS`, `RADIKO_USER_ID`, `RADIKO_PASSWORD`（必要時）
+- 入力: `TIMEFREE_RECORD_SECONDS`, `RADIKO_USER_ID`, `RADIKO_PASSWORD`
 - 手順:
-  - 終了済み番組からタイムフリー候補を 1 件選択（必要に応じてエリア局フォールバック）
-  - 指定秒数のみ録音実行
+  - 終了済み番組からタイムフリー候補を 1 件選択する
+  - 指定秒数のみ録音実行する
 - 判定:
   - 録音処理成功
   - 出力ファイル生成
@@ -135,14 +154,15 @@
   - `E-C004-OUTPUT-MISSING`
   - `E-C004-OUTPUT-TOO-SMALL`
 
-## 4.6 C005: らじる 聞き逃し配信録音検証
+### 4.6 C005: らじる 聞き逃し配信録音検証
 
 - ID: `C005_RADIRU_ONDEMAND_RECORD`
 - 目的: らじる★らじる聞き逃し録音経路の健全性を検知する
 - 入力: `RADIRU_AREA_ID`, `RADIRU_STATION_ID`
 - 手順:
-  - 聞き逃しURLあり・期限内の候補番組を 1 件選択
-  - 聞き逃し録音実行
+  - 最新のエリア/サービス定義を取得する
+  - 聞き逃しURLあり・期限内の候補番組を 1 件選択する
+  - 聞き逃し録音実行する
 - 判定:
   - 録音処理成功
   - 出力ファイル生成
@@ -154,7 +174,7 @@
   - `E-C005-OUTPUT-MISSING`
   - `E-C005-OUTPUT-TOO-SMALL`
 
-## 4.7 C010: radiko ログイン検証
+### 4.7 C010: radiko ログイン検証
 
 - ID: `C010_RADIKO_LOGIN`
 - 目的: radiko資格情報でログイン可能かを検証する
@@ -181,11 +201,10 @@
   - 失敗コード
   - 要約メッセージ
   - Actions Run URL
-- 同一失敗コードが連続する場合はメッセージを集約して通知スパムを抑制する。
-  - 現行workflowは抑制ロジック未実装（毎回通知）
+- 同一失敗コードが連続する場合の抑制ロジックは未実装
 
 ## 7. 今後の拡張候補
 
-- 取得レスポンスの構造差分（スキーマ）をスナップショット比較で検知
-- 連続失敗回数に応じた通知レベル切り替え
-- 失敗時の自動 Issue 起票
+- 取得レスポンスの構造差分をスナップショット比較で検知する
+- 連続失敗回数に応じて通知レベルを切り替える
+- 失敗時の自動 Issue 起票を行う

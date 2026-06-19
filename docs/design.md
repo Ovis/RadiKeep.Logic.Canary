@@ -3,18 +3,19 @@
 ## 1. 目的
 
 - RadiKeep が依存する外部Webサービス（radiko / らじる★らじる）の仕様変更を早期検知する。
-- 検知対象は「取得スキーマの破損」と「録音経路の実動作」。
+- 検知対象は「番組表取得スキーマの破損」と「録音経路の実動作」。
 - 本体アプリには Canary 機能を入れず、別リポジトリで定期実行する。
 
 ## 2. 方針
 
-- Canary は別リポジトリ（`RadiKeep.Logic.Canary`）で管理。
+- Canary は別リポジトリ（`RadiKeep.Logic.Canary`）で管理する。
 - `vendor/RadiKeep` を submodule として参照し、`RadiKeep.Logics` を直接呼び出す。
-- 録音チェックは独自ffmpeg実装を使わず、Logic 実装（`RecordingSource` + `MediaTranscodeService`）経由に統一する。
+- `Canary.Runner` は `RadiKeep.Logics` の公開IFに追従する。RadiKeep 側の更新時は submodule 更新と Runner 側ビルド確認をセットで行う。
+- 録音チェックは独自実装ではなく、Logic 実装（`RecordingSource` + `MediaTranscodeService`）経由に統一する。
 - 実行基盤は GitHub-hosted runner（`ubuntu-latest`）を基本とする。
 - 日本IP制約があるため、Tailscale Exit Node 経由で外向き通信を自宅回線へ迂回する。
 
-## 3. 実行環境（GitHub-hosted + Tailscale）
+## 3. 実行環境
 
 - Runner: GitHub-hosted `ubuntu-latest`
 - タイムゾーン: `Asia/Tokyo`
@@ -24,7 +25,7 @@
   - Tailscale 接続（OAuth + Exit Node）
 - ネットワーク:
   - Runner 自体は海外リージョンを含み得る
-  - Tailscale Exit Node により日本国内回線からの外向き通信として実行
+  - Tailscale Exit Node により日本国内回線からの外向き通信として実行する
 
 ## 4. リポジトリ構成
 
@@ -55,7 +56,7 @@ RadiKeep.Logic.Canary/
 ## 6. 判定モデル
 
 - 各チェックは `PASS / WARN / FAIL`
-- `WARN` は一時的通信障害（timeout/DNS/接続失敗など）に限定
+- `WARN` は一時的通信障害（timeout / DNS / 接続失敗など）に限定する
 - 全体結果:
   - `PASS`: FAIL/WARN なし
   - `WARN`: FAIL なし、WARN あり
@@ -73,7 +74,7 @@ RadiKeep.Logic.Canary/
 - ランナー:
   - `runs-on: ubuntu-latest`
   - `tailscale/github-action@v4` で tailnet 参加
-  - `--exit-node=<TS_EXIT_NODE>` を指定して egress を固定
+  - `--exit-node=<TS_EXIT_NODE>` を指定して egress を固定する
 - 生成物:
   - `results/status.json`
   - `logs/*.log`
@@ -83,7 +84,7 @@ RadiKeep.Logic.Canary/
   - `schedule`: WARN/FAIL時のみアップロード
   - `retention-days: 3`
   - 対象は `results/status.json` と `logs/**`
-  - 録音ファイルは著作権配慮のためアップロード前に削除
+  - 録音ファイルは著作権配慮のためアップロードしない
 - 通知:
   - 終了コード `!= 0`（WARN/FAIL）時に Discord Webhook 通知
 
@@ -103,8 +104,14 @@ RadiKeep.Logic.Canary/
   - `RADIKO_PASSWORD`
   - `DISCORD_WEBHOOK_URL`
 
-## 9. 運用
+## 9. 実装上の注意
+
+- らじる★らじるは `areaId + serviceId` ベースで扱う。`RadiruAreaKind` / `RadiruStationKind` は Runner 側の入力検証や候補選定には使うが、API呼び出しと録音経路の解決は `RadiKeep.Logics` の現行IFに従う。
+- 番組表JSONは取得結果の一次証跡として保存する。
+- schema検証は「録音に必要な必須項目」に絞り、optional項目は欠落率をログ化する。
+
+## 10. 運用
 
 - submodule は固定コミットで参照し、Canary結果の再現性を確保する。
-- RadiKeep 側更新時は submodule 更新PRで追従する。
-- 障害時は `status.json` と `logs` を一次情報として調査する。
+- RadiKeep 側更新時は submodule 更新PRで追従し、`Canary.Runner` のビルド確認を行う。
+- 障害時は `results/status.json` と `logs` を一次情報として調査する。
