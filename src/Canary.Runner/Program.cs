@@ -506,6 +506,7 @@ static LogicContext CreateLogicContext(string radikoUserId, string radikoPasswor
              radikoUserId,
              radikoPassword)));
 
+    var appContext = new RadioAppContext();
     var stationRepository = new InMemoryStationRepository();
     var radikoLogic = new RadikoUniqueProcessLogic(
         NullLogger<RadikoUniqueProcessLogic>.Instance,
@@ -518,6 +519,7 @@ static LogicContext CreateLogicContext(string radikoUserId, string radikoPasswor
     var entryMapper = new EntryMapper(configMock.Object);
     var stationLobLogic = new StationLobLogic(
         NullLogger<StationLobLogic>.Instance,
+        appContext,
         configMock.Object,
         radikoApiClient,
         stationRepository,
@@ -536,7 +538,6 @@ static LogicContext CreateLogicContext(string radikoUserId, string radikoPasswor
     var dbContext = new RadioDbContext(dbOptions);
     dbContext.Database.EnsureCreated();
 
-    var appContext = new RadioAppContext();
     var programScheduleRepository = new ProgramScheduleRepository(dbContext);
     var entryMapperForSchedule = new EntryMapper(configMock.Object);
     var programScheduleLobLogic = new ProgramScheduleLobLogic(
@@ -564,6 +565,8 @@ static LogicContext CreateLogicContext(string radikoUserId, string radikoPasswor
         ffmpegService,
         configMock.Object,
         httpClientFactory);
+    var localApplicationUrlService = new LocalApplicationUrlService();
+    var radikoProxyTicketService = new RadikoProxyTicketService();
 
     return new LogicContext(
         provider,
@@ -574,6 +577,8 @@ static LogicContext CreateLogicContext(string radikoUserId, string radikoPasswor
         stationLobLogic,
         radiruApiClient,
         programScheduleLobLogic,
+        localApplicationUrlService,
+        radikoProxyTicketService,
         mediaTranscodeService);
 }
 
@@ -690,6 +695,8 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
             logicContext.StationLobLogic,
             logicContext.RadikoLogic,
             logicContext.RadikoApiClient,
+            logicContext.RadikoProxyTicketService,
+            logicContext.LocalApplicationUrlService,
             logicContext.DbContext);
         var sourceResult = await source.PrepareAsync(command);
 
@@ -815,6 +822,8 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
             logicContext.StationLobLogic,
             logicContext.RadikoLogic,
             logicContext.RadikoApiClient,
+            logicContext.RadikoProxyTicketService,
+            logicContext.LocalApplicationUrlService,
             logicContext.DbContext);
         var sourceResult = await source.PrepareAsync(command);
 
@@ -1532,6 +1541,8 @@ sealed class LogicContext(
     StationLobLogic stationLobLogic,
     RadiruApiClient radiruApiClient,
     ProgramScheduleLobLogic programScheduleLobLogic,
+    ILocalApplicationUrlService localApplicationUrlService,
+    IRadikoProxyTicketService radikoProxyTicketService,
     MediaTranscodeService mediaTranscodeService) : IDisposable
 {
     public RadioDbContext DbContext { get; } = dbContext;
@@ -1541,6 +1552,8 @@ sealed class LogicContext(
     public StationLobLogic StationLobLogic { get; } = stationLobLogic;
     public RadiruApiClient RadiruApiClient { get; } = radiruApiClient;
     public ProgramScheduleLobLogic ProgramScheduleLobLogic { get; } = programScheduleLobLogic;
+    public ILocalApplicationUrlService LocalApplicationUrlService { get; } = localApplicationUrlService;
+    public IRadikoProxyTicketService RadikoProxyTicketService { get; } = radikoProxyTicketService;
     public MediaTranscodeService MediaTranscodeService { get; } = mediaTranscodeService;
 
     public void Dispose()
@@ -1558,10 +1571,10 @@ sealed class InMemoryStationRepository : IStationRepository
     public ValueTask<bool> HasAnyRadikoStationAsync(CancellationToken cancellationToken = default)
         => ValueTask.FromResult(false);
 
-    public ValueTask<List<RadikoStation>> GetRadikoStationsAsync(CancellationToken cancellationToken = default)
+    public ValueTask<List<RadikoStation>> GetRadikoStationsAsync(bool activeOnly = true, CancellationToken cancellationToken = default)
         => ValueTask.FromResult(new List<RadikoStation>());
 
-    public ValueTask AddRadikoStationsIfMissingAsync(IEnumerable<RadikoStation> stations, CancellationToken cancellationToken = default)
+    public ValueTask UpsertRadikoStationsAsync(IEnumerable<RadikoStation> stations, CancellationToken cancellationToken = default)
         => ValueTask.CompletedTask;
 
     public ValueTask<bool> HasAnyRadiruStationAsync(CancellationToken cancellationToken = default)
