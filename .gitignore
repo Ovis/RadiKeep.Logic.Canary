@@ -5,3 +5,5 @@ results/
 logs/
 *.user
 *.suo
+
+src/Canary.Runner/.vs/
