@@ -54,15 +54,15 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Track latest RadiKeep main
+      - name: Track latest RadiCorder main
         shell: bash
         run: |
           set -euo pipefail
           git submodule sync --recursive
           git submodule update --init --recursive --remote --depth 1
-          radikeep_sha="$(git -C vendor/RadiKeep rev-parse HEAD)"
-          echo "RADIKEEP_SUBMODULE_SHA=${radikeep_sha}" >> "${GITHUB_ENV}"
-          echo "RadiKeep submodule revision: ${radikeep_sha}"
+          radicorder_sha="$(git -C vendor/RadiCorder rev-parse HEAD)"
+          echo "RADICORDER_SUBMODULE_SHA=${radicorder_sha}" >> "${GITHUB_ENV}"
+          echo "RadiCorder submodule revision: ${radicorder_sha}"
 
       - name: Validate Tailscale secrets
         shell: bash
@@ -173,11 +173,11 @@ jobs:
               summary = "status.json not found"
 
           content = (
-              "[RadiKeep Canary] warning/failure detected\n"
+              "[RadiCorder Canary] warning/failure detected\n"
               f"repo: {os.getenv('GITHUB_REPOSITORY', '')}\n"
               f"run: #{os.getenv('GITHUB_RUN_NUMBER', '')}\n"
               f"ref: {os.getenv('GITHUB_REF_NAME', '')}\n"
-              f"radiKeepMain: {os.getenv('RADIKEEP_SUBMODULE_SHA', '')}\n"
+              f"radiCorderMain: {os.getenv('RADICORDER_SUBMODULE_SHA', '')}\n"
               f"url: https://github.com/{os.getenv('GITHUB_REPOSITORY', '')}/actions/runs/{os.getenv('GITHUB_RUN_ID', '')}\n"
               f"summary: {summary[:1500]}"
           )

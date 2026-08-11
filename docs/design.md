@@ -1,16 +1,16 @@
-# RadiKeep Canary 設計メモ
+# RadiCorder Canary 設計メモ
 
 ## 1. 目的
 
-- RadiKeep が依存する外部Webサービス（radiko / らじる★らじる）の仕様変更を早期検知する。
+- RadiCorder が依存する外部Webサービス（radiko / らじる★らじる）の仕様変更を早期検知する。
 - 検知対象は「番組表取得スキーマの破損」と「録音経路の実動作」。
 - 本体アプリには Canary 機能を入れず、別リポジトリで定期実行する。
 
 ## 2. 方針
 
-- Canary は別リポジトリ（`RadiKeep.Logic.Canary`）で管理する。
-- `vendor/RadiKeep` を submodule として参照し、`RadiKeep.Logics` を直接呼び出す。
-- `Canary.Runner` は `RadiKeep.Logics` の公開IFに追従する。RadiKeep 側の更新時は submodule 更新と Runner 側ビルド確認をセットで行う。
+- Canary は別リポジトリ（`RadiCorder.Logic.Canary`）で管理する。
+- `vendor/RadiCorder` を submodule として参照し、`RadiCorder.Logics` を直接呼び出す。
+- `Canary.Runner` は `RadiCorder.Logics` の公開IFに追従する。RadiCorder 側の更新時は submodule 更新と Runner 側ビルド確認をセットで行う。
 - 録音チェックは独自実装ではなく、Logic 実装（`RecordingSource` + `MediaTranscodeService`）経由に統一する。
 - 実行基盤は GitHub-hosted runner（`ubuntu-latest`）を基本とする。
 - 日本IP制約があるため、Tailscale Exit Node 経由で外向き通信を自宅回線へ迂回する。
@@ -30,9 +30,9 @@
 ## 4. リポジトリ構成
 
 ```text
-RadiKeep.Logic.Canary/
+RadiCorder.Logic.Canary/
   vendor/
-    RadiKeep/                 # submodule
+    RadiCorder/              # submodule
   src/
     Canary.Runner/            # 判定CLI
   docs/
@@ -106,13 +106,13 @@ RadiKeep.Logic.Canary/
 
 ## 9. 実装上の注意
 
-- らじる★らじるは `areaId + serviceId` ベースで扱う。`RadiruAreaKind` / `RadiruStationKind` は Runner 側の入力検証や候補選定には使うが、API呼び出しと録音経路の解決は `RadiKeep.Logics` の現行IFに従う。
+- らじる★らじるは `areaId + serviceId` ベースで扱う。`RadiruAreaKind` / `RadiruStationKind` は Runner 側の入力検証や候補選定には使うが、API呼び出しと録音経路の解決は `RadiCorder.Logics` の現行IFに従う。
 - 番組表JSONは取得結果の一次証跡として保存する。
 - schema検証は「録音に必要な必須項目」に絞り、optional項目は欠落率をログ化する。
 
 ## 10. 運用
 
-- GitHub Actions の Canary Workflow では `vendor/RadiKeep` を実行時に `main` の最新HEADへ更新し、その時点の `RadiKeep.Logics` を検証対象にする。
-- ローカルでは固定コミットの submodule を使って再現確認できるようにし、必要に応じて `git submodule update --remote vendor/RadiKeep` で最新 `main` を取り込む。
-- `RadiKeep.Logics` の公開IF変更で `Canary.Runner` が追従を要する場合があるため、submodule 更新時は Runner 側ビルド確認も行う。
+- GitHub Actions の Canary Workflow では `vendor/RadiCorder` を実行時に `main` の最新HEADへ更新し、その時点の `RadiCorder.Logics` を検証対象にする。
+- ローカルでは固定コミットの submodule を使って再現確認できるようにし、必要に応じて `git submodule update --remote vendor/RadiCorder` で最新 `main` を取り込む。
+- `RadiCorder.Logics` の公開IF変更で `Canary.Runner` が追従を要する場合があるため、submodule 更新時は Runner 側ビルド確認も行う。
 - 障害時は `results/status.json` と `logs` を一次情報として調査する。

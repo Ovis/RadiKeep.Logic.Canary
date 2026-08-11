@@ -1,8 +1,8 @@
-# RadiKeep Canary 判定仕様
+# RadiCorder Canary 判定仕様
 
 ## 1. 対象
 
-- 本仕様は、別リポジトリ `RadiKeep.Logic.Canary` で実行する Canary ジョブの判定ルールを定義する。
+- 本仕様は、別リポジトリ `RadiCorder.Logic.Canary` で実行する Canary ジョブの判定ルールを定義する。
 - 実行環境は GitHub-hosted runner（`ubuntu-latest`）+ Tailscale Exit Node を前提とする。
 
 ## 2. 共通ルール

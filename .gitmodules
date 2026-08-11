@@ -1,4 +1,4 @@
-[submodule "vendor/RadiKeep"]
-	path = vendor/RadiKeep
+[submodule "vendor/RadiCorder"]
+	path = vendor/RadiCorder
 	url = https://github.com/Ovis/RadiKeep.git
 	branch = main

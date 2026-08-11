@@ -1,10 +1,10 @@
-# RadiKeep.Logic.Canary
+# RadiCorder.Logic.Canary
 
-RadiKeep が依存する外部サービス変更を検知する Canary 実行リポジトリです。
+RadiCorder が依存する外部サービス変更を検知する Canary 実行リポジトリです。
 
 ## 構成
 
-- `vendor/RadiKeep`: RadiKeep submodule
+- `vendor/RadiCorder`: RadiCorder submodule
 - `src/Canary.Runner`: Canary 実行CLI
 - `.github/workflows/canary.yml`: GitHub-hosted runner + Tailscale Exit Node 実行ワークフロー
 - `docs/design.md`: 設計メモ
@@ -35,8 +35,8 @@ git submodule update --init --recursive
 ```
 
 補足:
-- GitHub Actions の Canary Workflow は実行ごとに `vendor/RadiKeep` を `main` の最新HEADへ更新してから実行する。
-- ローカル実行は手元の submodule checkout をそのまま使う。最新 `main` で試す場合は `git submodule update --remote vendor/RadiKeep` を先に実行する。
+- GitHub Actions の Canary Workflow は実行ごとに `vendor/RadiCorder` を `main` の最新HEADへ更新してから実行する。
+- ローカル実行は手元の submodule checkout をそのまま使う。最新 `main` で試す場合は `git submodule update --remote vendor/RadiCorder` を先に実行する。
 
 2. 必要な Secrets 設定
 - Tailscale
