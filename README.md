@@ -67,3 +67,15 @@ dotnet run --project src/Canary.Runner/Canary.Runner.csproj -- --status-json res
 - 保持期間: 3日
 - アップロード対象: `results/status.json`, `logs/**`
 - 録音ファイルは著作権配慮のためアップロード前に削除
+
+## 開発時の回帰検証
+
+```powershell
+dotnet test tests/Canary.Runner.Tests/Canary.Runner.Tests.csproj --configuration Release
+```
+
+この検証は外部サービス・Tailscale・資格情報を使わず、DI構成、専用DB、配信プロキシ、チェックの判定と出力形式を確認する。
+GitHub ActionsのPR検証でも固定コミットのsubmoduleを使って実行する。
+実サービスへの取得・認証・録音確認は、従来どおり `Canary Check` ワークフローが日本のネットワーク経由で実施する。
+
+Canaryの実行コードの構成と本体の利用範囲は [docs/design.md](docs/design.md) を参照。
