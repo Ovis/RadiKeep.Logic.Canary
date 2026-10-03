@@ -13,5 +13,6 @@
     <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
     <ProjectReference Include="../../src/Canary.Runner/Canary.Runner.csproj" />
     <Using Include="NUnit.Framework" />
+    <None Update="Fixtures/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
