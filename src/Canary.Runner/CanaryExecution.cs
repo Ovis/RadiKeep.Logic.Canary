@@ -32,6 +32,10 @@ internal static class CanaryExecution
             await using var logicContext = await LogicContext.CreateAsync(
                 options.RadikoUserId, options.RadikoPassword,
                 radiruAreaId: options.RadiruAreaId, radiruStationId: options.RadiruStationId);
+            var c006 = await RadikoStationDefinitionsCheck.CheckRadikoStationsFetchAsync(
+                logicContext, Path.Combine(options.LogDirectory, "C006_RADIKO_STATIONS_FETCH.log"));
+            checks.Add(c006);
+
             var c001 = await ProgramFetchChecks.CheckRadikoDailyFetchAsync(logicContext, options.RadikoStationId, todayJst, Path.Combine(options.LogDirectory, "C001_RADIKO_DAILY_FETCH.log"));
             checks.Add(c001);
 
@@ -82,6 +86,10 @@ internal static class CanaryExecution
                 options.RecordOutputDirectory,
                 Path.Combine(options.LogDirectory, "C005_RADIRU_ONDEMAND_RECORD.log"));
             checks.Add(c005RadiruOnDemand);
+
+            var c011 = await RadikoLogoutCheck.CheckRadikoLogoutAsync(
+                logicContext, Path.Combine(options.LogDirectory, "C011_RADIKO_LOGOUT.log"));
+            checks.Add(c011);
 
             var overall = checks.Any(c => c.Result == "FAIL")
                 ? "FAIL"

@@ -13,13 +13,19 @@ RadiCorder が依存する外部サービス変更を検知する Canary 実行�
 ## 現在のチェック
 
 - `C000_FFMPEG`
+- `C006_RADIKO_STATIONS_FETCH`
 - `C001_RADIKO_DAILY_FETCH`
 - `C002_RADIRU_DAILY_FETCH`
 - `C010_RADIKO_LOGIN`
 - `C003_RADIKO_REALTIME_RECORD`
-- `C003_RADIRU_REALTIME_RECORD`
 - `C004_RADIKO_TIMEFREE_RECORD`
+- `C003_RADIRU_REALTIME_RECORD`
 - `C005_RADIRU_ONDEMAND_RECORD`
+- `C011_RADIKO_LOGOUT`
+
+全国局定義は本体のAPIクライアントで取得・解析し、必須項目を確認する。
+ログアウトは全録音チェックの後に専用セッションで行い、録音用の認証キャッシュは使用しない。
+本体のDiscord通知・GitHub更新確認・NTP・ブラウザの外部フォント・番組画像の取得と埋め込みはチェック対象に含めない。
 
 ## 結果コード
 
