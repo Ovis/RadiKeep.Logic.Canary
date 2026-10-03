@@ -1,6 +1,7 @@
 using Canary.Runner.Hosting;
 using RadiCorder.Logics.Models.NhkRadiru;
-using RadiCorder.Logics.Models.NhkRadiru.JsonEntity;
+using Microsoft.EntityFrameworkCore;
+using RadiCorder.Logics.RdbContext;
 
 namespace Canary.Runner;
 
@@ -62,107 +63,29 @@ internal static class ProgramCandidateSelector
         return (candidate.Program.ProgramId, candidate.Program.Title, candidate.StartJst, candidate.EndJst);
     }
 
-    internal static async Task<(RadiruOnDemandCandidate? Candidate, bool HasExpiredCandidate)> FindRadiruOnDemandCandidateAsync(
+    internal static async Task<(NhkRadiruProgram? Candidate, bool HasExpiredCandidate)> FindRadiruOnDemandCandidateAsync(
         LogicContext logicContext,
         string areaId,
         RadiruStationKind stationKind,
         DateTimeOffset nowJst)
     {
-        var targetDates = new[]
-        {
-            nowJst,
-            nowJst.AddDays(-1)
-        };
-
-        var candidates = new List<RadiruOnDemandCandidate>();
-        var hasExpiredCandidate = false;
-
-        foreach (var targetDate in targetDates)
-        {
-            var programs = await logicContext.RadiruApiClient.GetDailyProgramsAsync(areaId, stationKind.ServiceId, targetDate);
-            foreach (var program in programs)
-            {
-                if (program.StartDate == default || program.EndDate == default || program.EndDate <= program.StartDate)
-                {
-                    continue;
-                }
-
-                if (program.EndDate > nowJst)
-                {
-                    continue;
-                }
-
-                var onDemandUrl = SelectRadiruOnDemandContentUrl(program);
-                if (string.IsNullOrWhiteSpace(onDemandUrl))
-                {
-                    continue;
-                }
-
-                var expiresAtUtc = program.About.Audio.Expires == default
-                    ? DateTime.MinValue
-                    : program.About.Audio.Expires.UtcDateTime;
-                if (expiresAtUtc <= DateTime.UtcNow)
-                {
-                    hasExpiredCandidate = true;
-                    continue;
-                }
-
-                candidates.Add(new RadiruOnDemandCandidate(program, onDemandUrl, expiresAtUtc));
-            }
-        }
-
-        if (candidates.Count == 0)
-        {
-            return (null, hasExpiredCandidate);
-        }
-
+        // URL選択と番組データの変換・保存も本体の実装を通す。
+        await logicContext.ProgramScheduleLobLogic.UpdateRadiruProgramDataAsync();
+        var programs = await logicContext.DbContext.NhkRadiruPrograms.AsNoTracking()
+            .Where(program => program.AreaId == areaId && program.StationId == stationKind.ServiceId)
+            .ToListAsync();
+        var candidates = programs.Where(program =>
+            program.StartTime != default && program.EndTime != default &&
+            program.EndTime > program.StartTime && program.EndTime <= nowJst &&
+            !string.IsNullOrWhiteSpace(program.OnDemandContentUrl)).ToList();
+        var nowUtc = DateTime.UtcNow;
+        var hasExpiredCandidate = candidates.Any(program =>
+            !program.OnDemandExpiresAtUtc.HasValue || program.OnDemandExpiresAtUtc.Value <= nowUtc);
         var candidate = candidates
-            .OrderBy(x => x.Program.EndDate - x.Program.StartDate)
-            .ThenByDescending(x => x.Program.EndDate)
-            .First();
+            .Where(program => program.OnDemandExpiresAtUtc.HasValue && program.OnDemandExpiresAtUtc.Value > nowUtc)
+            .OrderBy(program => program.EndTime - program.StartTime)
+            .ThenByDescending(program => program.EndTime)
+            .FirstOrDefault();
         return (candidate, hasExpiredCandidate);
-    }
-
-    internal static string? SelectRadiruOnDemandContentUrl(RadiruProgramJsonEntity program)
-    {
-        var detailedContents = program.About.Audio.DetailedContent
-            .Where(d => !string.IsNullOrWhiteSpace(d.ContentUrl))
-            .ToList();
-        if (detailedContents.Count == 0)
-        {
-            return null;
-        }
-
-        var prioritized = detailedContents.FirstOrDefault(d =>
-            string.Equals(d.Name, "hls_widevine", StringComparison.OrdinalIgnoreCase) &&
-            IsM3u8Url(d.ContentUrl));
-        if (prioritized is not null)
-        {
-            return prioritized.ContentUrl;
-        }
-
-        var fallback = detailedContents.FirstOrDefault(d => IsM3u8Url(d.ContentUrl));
-        return fallback?.ContentUrl;
-    }
-
-    internal static bool IsM3u8Url(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        if (!uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
-            !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return uri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
     }
 }

@@ -150,17 +150,11 @@ internal static class RadiruRecordingChecks
 
             var candidate = selection.Candidate;
 
-            var seededProgramId = await RecordingProbePrograms.SeedRadiruProgramForOnDemandRecordingAsync(
-                logicContext,
-                normalizedArea,
-                stationKind,
-                candidate.Program,
-                candidate.OnDemandUrl,
-                candidate.ExpiresAtUtc);
+            var seededProgramId = candidate.ProgramId;
             var command = new RecordingCommand(
                 RadioServiceKind.Radiru,
                 seededProgramId,
-                candidate.Program.Name,
+                candidate.Title,
                 IsTimeFree: false,
                 StartDelaySeconds: 0,
                 EndDelaySeconds: 0,
@@ -173,10 +167,10 @@ internal static class RadiruRecordingChecks
             ffmpegLogSnapshot = FfmpegLogs.CaptureFfmpegLogSnapshot(logicContext.FfmpegLogDirectory);
             var recorded = await logicContext.MediaTranscodeService.RecordAsync(sourceResult, mediaPath);
 
-            log.AppendLine($"ondemand_program={candidate.Program.Name}");
-            log.AppendLine($"ondemand_program_start={candidate.Program.StartDate:O}");
-            log.AppendLine($"ondemand_program_end={candidate.Program.EndDate:O}");
-            log.AppendLine($"ondemand_expires_utc={candidate.ExpiresAtUtc:O}");
+            log.AppendLine($"ondemand_program={candidate.Title}");
+            log.AppendLine($"ondemand_program_start={candidate.StartTime:O}");
+            log.AppendLine($"ondemand_program_end={candidate.EndTime:O}");
+            log.AppendLine($"ondemand_expires_utc={candidate.OnDemandExpiresAtUtc:O}");
             log.AppendLine($"seed_program_id={seededProgramId}");
             log.AppendLine($"output={outputPath}");
             log.AppendLine($"logic_recorded={recorded}");

@@ -7,9 +7,11 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RadiCorder.Features.Program;
+using RadiCorder.Logics.ApiClients;
 using RadiCorder.Logics.BackgroundServices;
 using RadiCorder.Logics.DependencyInjection;
 using RadiCorder.Logics.Domain.Recording;
@@ -48,7 +50,9 @@ internal sealed class LogicContext(WebApplication application, AsyncServiceScope
     internal static async Task<LogicContext> CreateAsync(
         string radikoUserId,
         string radikoPassword,
-        Action<IServiceCollection>? configureServices = null)
+        Action<IServiceCollection>? configureServices = null,
+        string radiruAreaId = "JP13",
+        string radiruStationId = "r1")
     {
         // 実行ごとにDBを分け、本体のDBや以前のCanary結果を参照しない。
         var workRoot = Path.Combine(Path.GetTempPath(), "radicorder-canary", Guid.NewGuid().ToString("N"));
@@ -90,6 +94,11 @@ internal sealed class LogicContext(WebApplication application, AsyncServiceScope
         builder.Services.AddSingleton<IRecordingScheduleWakeup, RecordingScheduleWakeup>();
         builder.Services.AddCanaryEventPublishers();
         builder.Services.AddRadiCorderLogics();
+        builder.Services.AddSingleton(new RadiruProbeTarget(
+            CanaryInputs.NormalizeRadiruAreaKey(radiruAreaId), radiruStationId,
+            DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, CanaryInputs.ResolveJapanTimeZone()).DateTime)));
+        builder.Services.AddScoped<RadiruApiClient>();
+        builder.Services.Replace(ServiceDescriptor.Scoped<IRadiruApiClient, CanaryRadiruApiClient>());
         configureServices?.Invoke(builder.Services);
 
         WebApplication? application = null;

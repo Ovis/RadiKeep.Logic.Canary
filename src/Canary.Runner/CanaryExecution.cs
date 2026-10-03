@@ -29,7 +29,9 @@ internal static class CanaryExecution
             checks.Add(ffmpegCheck);
 
             var todayJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, CanaryInputs.ResolveJapanTimeZone()).Date;
-            await using var logicContext = await LogicContext.CreateAsync(options.RadikoUserId, options.RadikoPassword);
+            await using var logicContext = await LogicContext.CreateAsync(
+                options.RadikoUserId, options.RadikoPassword,
+                radiruAreaId: options.RadiruAreaId, radiruStationId: options.RadiruStationId);
             var c001 = await ProgramFetchChecks.CheckRadikoDailyFetchAsync(logicContext, options.RadikoStationId, todayJst, Path.Combine(options.LogDirectory, "C001_RADIKO_DAILY_FETCH.log"));
             checks.Add(c001);
 

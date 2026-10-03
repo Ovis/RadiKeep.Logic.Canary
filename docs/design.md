@@ -138,9 +138,11 @@ RadiCorder.Logic.Canary/
 - 上記エンドポイントが参照するログカテゴリの型だけを `Hosting/ProgramEndpointsMarker.cs` に用意する。Webプロジェクト全体やフロントエンドのビルドは不要。
 - 録音チェックは従来と同じ `IRecordingSource.PrepareAsync` → `IMediaTranscodeService.RecordAsync` の経路を使う。予約監視や録音結果の正式保存を含むアプリ全体の確認ではない。
 
+- 聞き逃し配信URLの選択と番組データの変換・保存には、本体の `ProgramScheduleLobLogic.UpdateRadiruProgramDataAsync()` を使う。`CanaryRadiruApiClient` はその一括取得の対象を指定局・今日と昨日に絞り、取得・解析は本体のAPIクライアントへ委譲する。
+
 ### Canaryが担当するもの
 
-- 確認対象の局・日時・番組選択、短時間録音用の番組データの準備。
+- 確認対象の局・日時・番組選択、短時間録音用の番組データの準備。聞き逃し録音には本体が変換・保存した実番組データを使う。
 - 必須項目・録音成功・ファイルの存在とサイズの判定。
 - チェックID・エラーコード・PASS/WARN/FAIL・終了コード・ログとstatusの出力。
 - UI向けの通知には明示的な `CanaryEventPublisher` を登録する。ブラウザへの通知は行わず、チェック結果は既存のログとstatusで報告する。業務処理への `null` 注入や実行時Moqは使用しない。

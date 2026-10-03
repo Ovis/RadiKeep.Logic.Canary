@@ -45,26 +45,43 @@ public class RadiruRecordingTests
         }
     }
 
-    [Test]
-    public async Task 聞き逃し候補を選び本体の録音ソースで期限とURLを確認する()
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task 聞き逃し候補を選び本体の録音ソースで期限とURLを確認する(bool expired)
     {
         var now = DateTimeOffset.UtcNow;
         var program = new RadiruProgramJsonEntity
         {
             Id = "fixture", Name = "fixture on-demand", StartDate = now.AddMinutes(-20), EndDate = now.AddMinutes(-10),
-            About = new About { Audio = new Audio { Expires = now.AddDays(1), DetailedContent = [new DetailedContent { Name = "hls_widevine", ContentUrl = "https://fixture.invalid/ondemand.m3u8" }] } }
+            About = new About { Audio = new Audio { Expires = now.AddDays(expired ? -1 : 1), DetailedContent = [new DetailedContent { Name = "fallback", ContentUrl = "https://fixture.invalid/fallback.m3u8" }, new DetailedContent { Name = "hls_widevine", ContentUrl = "https://fixture.invalid/ondemand.m3u8" }] } }
         };
         var transcoder = new FixtureTranscoder(true, 32768);
+        var requests = new List<Uri>();
         var artifactRoot = Path.Combine(Path.GetTempPath(), "canary-ondemand-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(artifactRoot);
         try
         {
-            await using var context = await CreateContext(program, transcoder);
+            await using var context = await CreateContext(program, transcoder, requests);
             var result = await RadiruRecordingChecks.CheckRadiruOnDemandRecordingAsync(context, "130", "r1", artifactRoot, Path.Combine(artifactRoot, "check.log"));
-            Assert.That(result.Result, Is.EqualTo("PASS"));
+            Assert.That(result.Result, Is.EqualTo(expired ? "FAIL" : "PASS"));
             Assert.That(result.CheckId, Is.EqualTo("C005_RADIRU_ONDEMAND_RECORD"));
-            Assert.That(transcoder.Source!.StreamUrl, Is.EqualTo("https://fixture.invalid/ondemand.m3u8"));
-            Assert.That(transcoder.Source.Options.IsOnDemand, Is.True);
+            Assert.That(result.ErrorCode, Is.EqualTo(expired ? "E-C005-EXPIRED" : ""));
+            var dailyRequests = requests.Where(uri => !uri.AbsolutePath.EndsWith("config_web.xml")).ToList();
+            Assert.That(dailyRequests, Has.Count.EqualTo(2));
+            Assert.That(dailyRequests.All(uri => uri.AbsolutePath.StartsWith("/130/r1/")), Is.True);
+            var today = TimeZoneInfo.ConvertTime(now, CanaryInputs.ResolveJapanTimeZone());
+            Assert.That(dailyRequests.Select(uri => Path.GetFileNameWithoutExtension(uri.AbsolutePath)),
+                Is.EquivalentTo(new[] { today.ToString("yyyy-MM-dd"), today.AddDays(-1).ToString("yyyy-MM-dd") }));
+            if (expired)
+            {
+                Assert.That(transcoder.Source, Is.Null);
+            }
+            else
+            {
+                Assert.That(transcoder.Source!.StreamUrl, Is.EqualTo("https://fixture.invalid/ondemand.m3u8"));
+                Assert.That(transcoder.Source.ProgramInfo.ProgramId, Is.EqualTo("fixture"));
+                Assert.That(transcoder.Source.Options.IsOnDemand, Is.True);
+            }
         }
         finally
         {
@@ -72,21 +89,22 @@ public class RadiruRecordingTests
         }
     }
 
-    private static Task<LogicContext> CreateContext(RadiruProgramJsonEntity program, FixtureTranscoder transcoder) =>
+    private static Task<LogicContext> CreateContext(RadiruProgramJsonEntity program, FixtureTranscoder transcoder, List<Uri>? requests = null) =>
         LogicContext.CreateAsync("", "", services =>
         {
-            services.AddHttpClient(HttpClientNames.Radiru).ConfigurePrimaryHttpMessageHandler(() => new RadiruHandler(program));
+            services.AddHttpClient(HttpClientNames.Radiru).ConfigurePrimaryHttpMessageHandler(() => new RadiruHandler(program, requests));
             services.AddSingleton<IMediaTranscodeService>(transcoder);
         });
 
-    private sealed class RadiruHandler(RadiruProgramJsonEntity program) : HttpMessageHandler
+    private sealed class RadiruHandler(RadiruProgramJsonEntity program, List<Uri>? requests) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            requests?.Add(request.RequestUri!);
             const string config = """
                 <radiru_config>
                   <url_program_day>https://fixture.invalid/{area}/{service}/[YYYY-MM-DD].json</url_program_day>
-                  <stream_url><data><areakey>130</areakey><areajp>東京</areajp><apikey>fixture</apikey><r1hls>https://fixture.invalid/live.m3u8</r1hls></data></stream_url>
+                  <stream_url><data><areakey>130</areakey><areajp>東京</areajp><apikey>fixture</apikey><r1hls>https://fixture.invalid/live.m3u8</r1hls><fmhls>https://fixture.invalid/fm.m3u8</fmhls></data><data><areakey>270</areakey><areajp>大阪</areajp><r1hls>https://fixture.invalid/osaka.m3u8</r1hls></data></stream_url>
                 </radiru_config>
                 """;
             var content = request.RequestUri!.AbsolutePath.EndsWith("config_web.xml")

@@ -169,38 +169,4 @@ internal static class RecordingProbePrograms
         return programId;
     }
 
-    internal static async Task<string> SeedRadiruProgramForOnDemandRecordingAsync(
-        LogicContext logicContext,
-        string normalizedAreaId,
-        RadiruStationKind stationKind,
-        RadiruProgramJsonEntity sourceProgram,
-        string onDemandContentUrl,
-        DateTime onDemandExpiresAtUtc)
-    {
-        var programId = $"canary-radiru-ondemand-{stationKind.ServiceId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-
-        await logicContext.DbContext.NhkRadiruPrograms.AddAsync(new NhkRadiruProgram
-        {
-            ProgramId = programId,
-            StationId = stationKind.ServiceId,
-            AreaId = normalizedAreaId,
-            Title = sourceProgram.Name,
-            Subtitle = sourceProgram.IdentifierGroup.RadioEpisodeName ?? string.Empty,
-            RadioDate = sourceProgram.StartDate.ToRadioDate(),
-            DaysOfWeek = sourceProgram.StartDate.ToRadioDayOfWeek().ToDaysOfWeek(),
-            StartTime = sourceProgram.StartDate,
-            EndTime = sourceProgram.EndDate,
-            Performer = string.Empty,
-            Description = sourceProgram.Description ?? string.Empty,
-            SiteId = sourceProgram.IdentifierGroup.SiteId ?? string.Empty,
-            EventId = sourceProgram.About.Id ?? string.Empty,
-            ProgramUrl = sourceProgram.About.Url ?? string.Empty,
-            ImageUrl = sourceProgram.About.PartOfSeries.Logo.Medium.Url ?? string.Empty,
-            OnDemandContentUrl = onDemandContentUrl,
-            OnDemandExpiresAtUtc = onDemandExpiresAtUtc
-        });
-
-        await logicContext.DbContext.SaveChangesAsync();
-        return programId;
-    }
 }

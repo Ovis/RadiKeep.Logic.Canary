@@ -1,5 +1,3 @@
-using RadiCorder.Logics.Models.NhkRadiru.JsonEntity;
-
 namespace Canary.Runner;
 
 internal sealed class CanaryStatus
@@ -9,11 +7,6 @@ internal sealed class CanaryStatus
     public required string TimestampJst { get; init; }
     public required List<CheckResult> Checks { get; init; }
 }
-
-internal sealed record RadiruOnDemandCandidate(
-    RadiruProgramJsonEntity Program,
-    string OnDemandUrl,
-    DateTime ExpiresAtUtc);
 
 internal sealed record ProgramSchemaIssue(string ProgramId, string Field, string Reason);
 
