@@ -8,8 +8,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\..\vendor\RadiCorder\RadiCorder.Logics\RadiCorder.Logics.csproj" />
-    <PackageReference Include="Moq" Version="4.20.72" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
+    <!-- HTTP境界も本体の実装を使い、Canary側に配信処理を複製しない。 -->
+    <Compile Include="../../vendor/RadiCorder/RadiCorder/Features/Program/RadikoStreamingEndpoints.cs" Link="Production/RadikoStreamingEndpoints.cs" />
   </ItemGroup>
 </Project>

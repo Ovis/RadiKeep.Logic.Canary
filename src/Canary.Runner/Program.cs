@@ -1,3 +1,4 @@
+using Canary.Runner.Hosting;
 using System.Diagnostics;
 using System.Globalization;
 using System.Collections.Concurrent;
@@ -14,7 +15,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.EntityFrameworkCore;
-using Moq;
 using RadiCorder.Logics.ApiClients;
 using RadiCorder.Logics.Application;
 using RadiCorder.Logics.Context;
@@ -75,10 +75,7 @@ try
     checks.Add(ffmpegCheck);
 
     var todayJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, ResolveJapanTimeZone()).Date;
-    using var httpClient = CreateHttpClient();
-    await using var logicContext = CreateLogicContext(radikoUserId, radikoPassword);
-    var proxyApplication = await StartRadikoProxyHostAsync(logicContext);
-    logicContext.AttachProxyApplication(proxyApplication);
+    await using var logicContext = await LogicContext.CreateAsync(radikoUserId, radikoPassword);
     var c001 = await CheckRadikoDailyFetchAsync(logicContext, radikoStationId, todayJst, Path.Combine(logDir, "C001_RADIKO_DAILY_FETCH.log"));
     checks.Add(c001);
 
@@ -188,23 +185,6 @@ static TimeZoneInfo ResolveJapanTimeZone()
     }
 
     return TimeZoneInfo.Utc;
-}
-
-static HttpClient CreateHttpClient()
-{
-    var handler = new HttpClientHandler
-    {
-        AutomaticDecompression = System.Net.DecompressionMethods.GZip |
-                                 System.Net.DecompressionMethods.Deflate |
-                                 System.Net.DecompressionMethods.Brotli
-    };
-
-    var client = new HttpClient(handler)
-    {
-        Timeout = TimeSpan.FromSeconds(20)
-    };
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("RadiCorder.Logic.Canary/0.1");
-    return client;
 }
 
 static async Task<CheckResult> CheckRadikoDailyFetchAsync(LogicContext logicContext, string stationId, DateTime dateJst, string logPath)
@@ -469,249 +449,6 @@ static string NormalizeRadiruAreaKey(string areaId)
     return trimmed;
 }
 
-static LogicContext CreateLogicContext(string radikoUserId, string radikoPassword)
-{
-    var services = new ServiceCollection();
-    services.AddHttpClient(HttpClientNames.Radiko).ConfigurePrimaryHttpMessageHandler(() =>
-        new HttpClientHandler
-        {
-            AutomaticDecompression = System.Net.DecompressionMethods.Brotli |
-                                     System.Net.DecompressionMethods.GZip |
-                                     System.Net.DecompressionMethods.Deflate
-        });
-    services.AddHttpClient(HttpClientNames.Radiru).ConfigurePrimaryHttpMessageHandler(() =>
-        new HttpClientHandler
-        {
-            AutomaticDecompression = System.Net.DecompressionMethods.Brotli |
-                                     System.Net.DecompressionMethods.GZip |
-                                     System.Net.DecompressionMethods.Deflate
-        });
-    var provider = services.BuildServiceProvider();
-    var httpClientFactory = provider.GetRequiredService<IHttpClientFactory>();
-    var workRoot = Path.Combine(Path.GetTempPath(), "radicorder-canary");
-    var tempRoot = Path.Combine(workRoot, "temp");
-    var logRoot = Path.Combine(workRoot, "logs");
-    Directory.CreateDirectory(tempRoot);
-    Directory.CreateDirectory(logRoot);
-
-    var configMock = new Mock<IAppConfigurationService>();
-    var stationDic = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    configMock.SetupGet(x => x.RadikoStationDic).Returns(stationDic);
-    configMock.SetupGet(x => x.ExternalServiceUserAgent).Returns("RadiCorder.Logic.Canary/0.1");
-    configMock.SetupGet(x => x.TemporaryFileSaveDir).Returns(tempRoot);
-    configMock.SetupGet(x => x.FfmpegExecutablePath).Returns(string.Empty);
-    configMock.SetupGet(x => x.EmbedProgramImageOnRecord).Returns(false);
-    configMock.SetupGet(x => x.RadiruApiMinRequestIntervalMs).Returns(0);
-    configMock.SetupGet(x => x.RadiruApiRequestJitterMs).Returns(0);
-    configMock.SetupGet(x => x.IsRadikoAreaFree).Returns(false);
-    configMock.Setup(x => x.UpdateRadikoPremiumUser(It.IsAny<bool>()));
-    configMock.Setup(x => x.UpdateRadikoAreaFree(It.IsAny<bool>()));
-    configMock.Setup(x => x.UpdateRadikoStationDic(It.IsAny<List<RadikoStation>>()))
-        .Callback<List<RadikoStation>>(stations =>
-        {
-            foreach (var station in stations)
-            {
-                stationDic[station.StationId] = station.StationName;
-            }
-        });
-    configMock.Setup(x => x.ChooseStationName(It.IsAny<RadioServiceKind>(), It.IsAny<string>()))
-        .Returns<RadioServiceKind, string>((kind, stationId) =>
-            stationDic.TryGetValue(stationId, out var name) ? name : stationId);
-    configMock.Setup(x => x.TryGetRadikoCredentialsAsync())
-        .Returns(ValueTask.FromResult(
-            (!string.IsNullOrWhiteSpace(radikoUserId) && !string.IsNullOrWhiteSpace(radikoPassword),
-             radikoUserId,
-             radikoPassword)));
-
-    var appContext = new RadioAppContext();
-    var stationRepository = new InMemoryStationRepository();
-    var radikoLogic = new RadikoUniqueProcessLogic(
-        NullLogger<RadikoUniqueProcessLogic>.Instance,
-        configMock.Object,
-        httpClientFactory);
-    var radikoApiClient = new RadikoApiClient(
-        NullLogger<RadikoApiClient>.Instance,
-        configMock.Object,
-        httpClientFactory);
-    var entryMapper = new EntryMapper(configMock.Object);
-    var stationLobLogic = new StationLobLogic(
-        NullLogger<StationLobLogic>.Instance,
-        appContext,
-        configMock.Object,
-        radikoApiClient,
-        stationRepository,
-        radikoLogic,
-        httpClientFactory,
-        entryMapper);
-    var radiruApiClient = new RadiruApiClient(
-        NullLogger<RadiruApiClient>.Instance,
-        stationLobLogic,
-        configMock.Object,
-        httpClientFactory);
-
-    var dbOptions = new DbContextOptionsBuilder<RadioDbContext>()
-        .UseSqlite($"Data Source={Path.Combine(workRoot, "canary.db")}")
-        .Options;
-    var dbContext = new RadioDbContext(dbOptions);
-    dbContext.Database.EnsureCreated();
-
-    var programScheduleRepository = new ProgramScheduleRepository(dbContext);
-    var entryMapperForSchedule = new EntryMapper(configMock.Object);
-    var programScheduleLobLogic = new ProgramScheduleLobLogic(
-        NullLogger<ProgramScheduleLobLogic>.Instance,
-        appContext,
-        radikoApiClient,
-        radiruApiClient,
-        programScheduleRepository,
-        null!,
-        entryMapperForSchedule,
-        null);
-
-    var inMemoryConfig = new ConfigurationBuilder()
-        .AddInMemoryCollection(new Dictionary<string, string?>
-        {
-            ["RadiCorder:LogDirectory"] = logRoot
-        })
-        .Build();
-    var ffmpegService = new FfmpegService(
-        NullLogger<IFfmpegService>.Instance,
-        configMock.Object,
-        inMemoryConfig);
-    var mediaTranscodeService = new MediaTranscodeService(
-        NullLogger<MediaTranscodeService>.Instance,
-        ffmpegService,
-        configMock.Object,
-        httpClientFactory);
-    var localApplicationUrlService = new LocalApplicationUrlService();
-    var radikoProxyTicketService = new RadikoProxyTicketService();
-
-    return new LogicContext(
-        provider,
-        dbContext,
-        stationDic,
-        configMock.Object,
-        httpClientFactory,
-        radikoLogic,
-        radikoApiClient,
-        stationLobLogic,
-        radiruApiClient,
-        programScheduleLobLogic,
-        localApplicationUrlService,
-        radikoProxyTicketService,
-        logRoot,
-        mediaTranscodeService);
-}
-
-static async Task<WebApplication> StartRadikoProxyHostAsync(LogicContext logicContext)
-{
-    var builder = WebApplication.CreateSlimBuilder();
-    builder.WebHost.UseUrls("http://127.0.0.1:0");
-
-    var app = builder.Build();
-    app.MapGet("/api/programs/radiko-proxy", (HttpContext context, CancellationToken cancellationToken) =>
-        HandleRadikoProxyRequestAsync(context, logicContext, cancellationToken));
-    app.MapGet("/api/programs/radiko-proxy/{*hint}", (HttpContext context, CancellationToken cancellationToken) =>
-        HandleRadikoProxyRequestAsync(context, logicContext, cancellationToken));
-
-    await app.StartAsync();
-
-    var addresses = app.Services.GetRequiredService<IServer>()
-        .Features
-        .Get<IServerAddressesFeature>()?
-        .Addresses
-        .ToArray()
-        ?? app.Urls.ToArray();
-    logicContext.LocalApplicationUrlService.SetCandidateUrls(addresses);
-    return app;
-}
-
-static async Task<IResult> HandleRadikoProxyRequestAsync(
-    HttpContext context,
-    LogicContext logicContext,
-    CancellationToken cancellationToken)
-{
-    var target = context.Request.Query["target"].ToString();
-    var token = NullIfWhiteSpace(context.Request.Query["token"].ToString());
-    var proxyKey = NullIfWhiteSpace(context.Request.Query["proxyKey"].ToString());
-    var resolveLivePlaylist = bool.TryParse(context.Request.Query["resolveLivePlaylist"], out var parsedResolve)
-        ? parsedResolve
-        : (bool?)null;
-
-    if (string.IsNullOrWhiteSpace(target) || (string.IsNullOrWhiteSpace(token) && string.IsNullOrWhiteSpace(proxyKey)))
-    {
-        return Results.BadRequest("target and proxyKey/token are required.");
-    }
-
-    if (!Uri.TryCreate(target, UriKind.Absolute, out var targetUri) || !IsAllowedRadikoProxyTarget(targetUri))
-    {
-        return Results.BadRequest("Invalid proxy target.");
-    }
-
-    var resolvedToken = ResolveProxyToken(logicContext.RadikoProxyTicketService, token, proxyKey);
-    if (string.IsNullOrWhiteSpace(resolvedToken))
-    {
-        return Results.BadRequest("Invalid proxy credential.");
-    }
-
-    var effectiveProxyKey = !string.IsNullOrWhiteSpace(proxyKey)
-        ? proxyKey!
-        : logicContext.RadikoProxyTicketService.IssueTokenTicket(resolvedToken);
-
-    try
-    {
-        var client = logicContext.HttpClientFactory.CreateClient(HttpClientNames.Radiko);
-        if (resolveLivePlaylist == true)
-        {
-            var (resolvedPlaylist, playlistBaseUri, statusCode) = await ResolveLivePlaylistAsync(
-                client,
-                logicContext.Config,
-                targetUri,
-                resolvedToken,
-                cancellationToken);
-            if (resolvedPlaylist == null || playlistBaseUri == null)
-            {
-                return Results.StatusCode(statusCode);
-            }
-
-            var rewritten = RewritePlaylistToLocalProxy(resolvedPlaylist, playlistBaseUri, effectiveProxyKey);
-            return Results.Content(rewritten, "application/vnd.apple.mpegurl");
-        }
-
-        var response = await SendRadikoProxyRequestAsync(client, logicContext.Config, targetUri, resolvedToken, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            response.Dispose();
-            return Results.StatusCode((int)response.StatusCode);
-        }
-
-        if (IsPlaylistRequest(targetUri, response.Content.Headers.ContentType?.MediaType))
-        {
-            using (response)
-            {
-                var playlist = await response.Content.ReadAsStringAsync(cancellationToken);
-                var rewritten = RewritePlaylistToLocalProxy(playlist, targetUri, effectiveProxyKey);
-                return Results.Content(rewritten, "application/vnd.apple.mpegurl");
-            }
-        }
-
-        var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
-        return Results.Stream(
-            async outputStream =>
-            {
-                using (response)
-                {
-                    await using var upstreamStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                    await upstreamStream.CopyToAsync(outputStream, cancellationToken);
-                }
-            },
-            contentType);
-    }
-    catch (Exception ex)
-    {
-        return Results.Text($"radiko proxy failed: {ex.Message}", statusCode: StatusCodes.Status502BadGateway);
-    }
-}
-
 static async Task<CheckResult> CheckRadikoLoginAsync(
     LogicContext logicContext,
     string userId,
@@ -820,15 +557,7 @@ static async Task<CheckResult> CheckRadikoRealtimeRecordingAsync(
             IsTimeFree: false,
             StartDelaySeconds: 0,
             EndDelaySeconds: 0);
-        var source = new RadikoRecordingSource(
-            NullLogger<RadikoRecordingSource>.Instance,
-            logicContext.ProgramScheduleLobLogic,
-            logicContext.StationLobLogic,
-            logicContext.RadikoLogic,
-            logicContext.RadikoApiClient,
-            logicContext.RadikoProxyTicketService,
-            logicContext.LocalApplicationUrlService,
-            logicContext.DbContext);
+        var source = logicContext.GetRecordingSource(RadioServiceKind.Radiko);
         var sourceResult = await source.PrepareAsync(command);
 
         var outputPath = Path.Combine(recordOutputDir, $"radiko-realtime-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
@@ -951,15 +680,7 @@ static async Task<CheckResult> CheckRadikoTimeFreeRecordingAsync(
             IsTimeFree: true,
             StartDelaySeconds: 0,
             EndDelaySeconds: 0);
-        var source = new RadikoRecordingSource(
-            NullLogger<RadikoRecordingSource>.Instance,
-            logicContext.ProgramScheduleLobLogic,
-            logicContext.StationLobLogic,
-            logicContext.RadikoLogic,
-            logicContext.RadikoApiClient,
-            logicContext.RadikoProxyTicketService,
-            logicContext.LocalApplicationUrlService,
-            logicContext.DbContext);
+        var source = logicContext.GetRecordingSource(RadioServiceKind.Radiko);
         var sourceResult = await source.PrepareAsync(command);
 
         var outputPath = Path.Combine(recordOutputDir, $"radiko-timefree-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
@@ -1055,10 +776,7 @@ static async Task<CheckResult> CheckRadiruRealtimeRecordingAsync(
             IsTimeFree: false,
             StartDelaySeconds: 0,
             EndDelaySeconds: 0);
-        var source = new RadiruRecordingSource(
-            NullLogger<RadiruRecordingSource>.Instance,
-            logicContext.ProgramScheduleLobLogic,
-            logicContext.StationLobLogic);
+        var source = logicContext.GetRecordingSource(RadioServiceKind.Radiru);
         var sourceResult = await source.PrepareAsync(command);
 
         var outputPath = Path.Combine(recordOutputDir, $"radiru-realtime-{normalizedArea}-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
@@ -1162,10 +880,7 @@ static async Task<CheckResult> CheckRadiruOnDemandRecordingAsync(
             StartDelaySeconds: 0,
             EndDelaySeconds: 0,
             IsOnDemand: true);
-        var source = new RadiruRecordingSource(
-            NullLogger<RadiruRecordingSource>.Instance,
-            logicContext.ProgramScheduleLobLogic,
-            logicContext.StationLobLogic);
+        var source = logicContext.GetRecordingSource(RadioServiceKind.Radiru);
         var sourceResult = await source.PrepareAsync(command);
 
         var outputPath = Path.Combine(recordOutputDir, $"radiru-ondemand-{normalizedArea}-{stationId}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.m4a");
@@ -1770,158 +1485,6 @@ static string BuildCopiedFfmpegLogPath(string artifactLogDirectory, string check
         $"{checkId}_ffmpeg_{Path.GetFileNameWithoutExtension(sourcePath)}_{Guid.NewGuid():N}{Path.GetExtension(sourcePath)}");
 }
 
-static string? NullIfWhiteSpace(string? value)
-    => string.IsNullOrWhiteSpace(value) ? null : value;
-
-static bool IsAllowedRadikoProxyTarget(Uri uri)
-{
-    if (!uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-    {
-        return false;
-    }
-
-    var host = uri.Host;
-    return host.Equals("radiko.jp", StringComparison.OrdinalIgnoreCase) ||
-           host.EndsWith(".radiko.jp", StringComparison.OrdinalIgnoreCase) ||
-           host.EndsWith(".smartstream.ne.jp", StringComparison.OrdinalIgnoreCase) ||
-           host.EndsWith(".radiko-cf.com", StringComparison.OrdinalIgnoreCase);
-}
-
-static bool IsPlaylistRequest(Uri targetUri, string? mediaType)
-{
-    if (!string.IsNullOrWhiteSpace(mediaType) &&
-        (mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) ||
-         mediaType.Contains("vnd.apple.mpegurl", StringComparison.OrdinalIgnoreCase)))
-    {
-        return true;
-    }
-
-    return targetUri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
-}
-
-static string RewritePlaylistToLocalProxy(string content, Uri baseUri, string proxyKey)
-{
-    var normalized = content.Replace("\r\n", "\n");
-    var lines = normalized.Split('\n');
-    var isMasterPlaylist = normalized.Contains("#EXT-X-STREAM-INF", StringComparison.Ordinal);
-    for (var i = 0; i < lines.Length; i++)
-    {
-        var line = lines[i];
-        if (string.IsNullOrWhiteSpace(line))
-        {
-            continue;
-        }
-
-        if (line.StartsWith('#'))
-        {
-            lines[i] = RewriteTagLineUris(line, baseUri, proxyKey);
-            continue;
-        }
-
-        lines[i] = isMasterPlaylist
-            ? RadikoProxyUrlUtility.BuildRelativeProxyUrlWithProxyKey(baseUri.ToString(), proxyKey, resolveLivePlaylist: true)
-            : RadikoProxyUrlUtility.BuildRelativeProxyUrlWithProxyKey(new Uri(baseUri, line).ToString(), proxyKey);
-    }
-
-    return string.Join('\n', lines);
-}
-
-static string RewriteTagLineUris(string line, Uri baseUri, string proxyKey)
-{
-    return Regex.Replace(
-        line,
-        "URI=\"([^\"]+)\"",
-        match =>
-        {
-            var value = match.Groups[1].Value;
-            var resolved = new Uri(baseUri, value).ToString();
-            var proxied = RadikoProxyUrlUtility.BuildRelativeProxyUrlWithProxyKey(resolved, proxyKey);
-            return $"URI=\"{proxied}\"";
-        });
-}
-
-static string? ResolveProxyToken(
-    IRadikoProxyTicketService radikoProxyTicketService,
-    string? token,
-    string? proxyKey)
-{
-    if (!string.IsNullOrWhiteSpace(proxyKey))
-    {
-        return radikoProxyTicketService.TryGetToken(proxyKey, out var resolvedToken)
-            ? resolvedToken
-            : null;
-    }
-
-    return string.IsNullOrWhiteSpace(token) ? null : token;
-}
-
-static async Task<HttpResponseMessage> SendRadikoProxyRequestAsync(
-    HttpClient client,
-    IAppConfigurationService config,
-    Uri targetUri,
-    string token,
-    CancellationToken cancellationToken)
-{
-    using var request = new HttpRequestMessage(HttpMethod.Get, targetUri);
-    request.Headers.TryAddWithoutValidation("X-Radiko-Authtoken", token);
-    request.Headers.TryAddWithoutValidation("User-Agent", config.ExternalServiceUserAgent);
-    return await client.SendAsync(
-        request,
-        HttpCompletionOption.ResponseHeadersRead,
-        cancellationToken);
-}
-
-static async Task<(string? Playlist, Uri? PlaylistBaseUri, int StatusCode)> ResolveLivePlaylistAsync(
-    HttpClient client,
-    IAppConfigurationService config,
-    Uri targetUri,
-    string token,
-    CancellationToken cancellationToken)
-{
-    using var upstreamResponse = await SendRadikoProxyRequestAsync(client, config, targetUri, token, cancellationToken);
-    if (!upstreamResponse.IsSuccessStatusCode)
-    {
-        return (null, null, (int)upstreamResponse.StatusCode);
-    }
-
-    var upstreamContent = await upstreamResponse.Content.ReadAsStringAsync(cancellationToken);
-    if (!upstreamContent.Contains("#EXT-X-STREAM-INF", StringComparison.Ordinal))
-    {
-        return (upstreamContent, targetUri, StatusCodes.Status200OK);
-    }
-
-    var mediaPlaylistUri = ExtractFirstPlaylistUri(upstreamContent, targetUri);
-    if (mediaPlaylistUri == null)
-    {
-        return (null, null, StatusCodes.Status502BadGateway);
-    }
-
-    using var mediaPlaylistResponse = await SendRadikoProxyRequestAsync(client, config, mediaPlaylistUri, token, cancellationToken);
-    if (!mediaPlaylistResponse.IsSuccessStatusCode)
-    {
-        return (null, null, (int)mediaPlaylistResponse.StatusCode);
-    }
-
-    var mediaPlaylist = await mediaPlaylistResponse.Content.ReadAsStringAsync(cancellationToken);
-    return (mediaPlaylist, mediaPlaylistUri, StatusCodes.Status200OK);
-}
-
-static Uri? ExtractFirstPlaylistUri(string playlist, Uri baseUri)
-{
-    var normalized = playlist.Replace("\r\n", "\n");
-    foreach (var line in normalized.Split('\n'))
-    {
-        if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#'))
-        {
-            continue;
-        }
-
-        return new Uri(baseUri, line);
-    }
-
-    return null;
-}
-
 static Dictionary<string, string> ParseArgs(string[] args)
 {
     var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1946,150 +1509,6 @@ static Dictionary<string, string> ParseArgs(string[] args)
 static string GetArg(Dictionary<string, string> map, string key, string defaultValue)
     => map.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : defaultValue;
 
-sealed class LogicContext(
-    ServiceProvider serviceProvider,
-    RadioDbContext dbContext,
-    ConcurrentDictionary<string, string> radikoStationDic,
-    IAppConfigurationService config,
-    IHttpClientFactory httpClientFactory,
-    RadikoUniqueProcessLogic radikoLogic,
-    RadikoApiClient radikoApiClient,
-    StationLobLogic stationLobLogic,
-    RadiruApiClient radiruApiClient,
-    ProgramScheduleLobLogic programScheduleLobLogic,
-    ILocalApplicationUrlService localApplicationUrlService,
-    IRadikoProxyTicketService radikoProxyTicketService,
-    string ffmpegLogDirectory,
-    MediaTranscodeService mediaTranscodeService) : IAsyncDisposable, IDisposable
-{
-    private WebApplication? _proxyApplication;
-
-    public RadioDbContext DbContext { get; } = dbContext;
-    public ConcurrentDictionary<string, string> RadikoStationDic { get; } = radikoStationDic;
-    public IAppConfigurationService Config { get; } = config;
-    public IHttpClientFactory HttpClientFactory { get; } = httpClientFactory;
-    public RadikoUniqueProcessLogic RadikoLogic { get; } = radikoLogic;
-    public RadikoApiClient RadikoApiClient { get; } = radikoApiClient;
-    public StationLobLogic StationLobLogic { get; } = stationLobLogic;
-    public RadiruApiClient RadiruApiClient { get; } = radiruApiClient;
-    public ProgramScheduleLobLogic ProgramScheduleLobLogic { get; } = programScheduleLobLogic;
-    public ILocalApplicationUrlService LocalApplicationUrlService { get; } = localApplicationUrlService;
-    public IRadikoProxyTicketService RadikoProxyTicketService { get; } = radikoProxyTicketService;
-    public string FfmpegLogDirectory { get; } = ffmpegLogDirectory;
-    public MediaTranscodeService MediaTranscodeService { get; } = mediaTranscodeService;
-
-    public void AttachProxyApplication(WebApplication proxyApplication)
-    {
-        _proxyApplication = proxyApplication;
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_proxyApplication is not null)
-        {
-            await _proxyApplication.StopAsync();
-            await _proxyApplication.DisposeAsync();
-        }
-
-        DbContext.Dispose();
-        serviceProvider.Dispose();
-    }
-
-    public void Dispose()
-    {
-        if (_proxyApplication is not null)
-        {
-            _proxyApplication.StopAsync().GetAwaiter().GetResult();
-            _proxyApplication.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        }
-
-        DbContext.Dispose();
-        serviceProvider.Dispose();
-    }
-}
-
-sealed class InMemoryStationRepository : IStationRepository
-{
-    private readonly Dictionary<string, NhkRadiruArea> _radiruAreas = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, NhkRadiruAreaService> _radiruAreaServices = new(StringComparer.OrdinalIgnoreCase);
-
-    public ValueTask<bool> HasAnyRadikoStationAsync(CancellationToken cancellationToken = default)
-        => ValueTask.FromResult(false);
-
-    public ValueTask<List<RadikoStation>> GetRadikoStationsAsync(bool activeOnly = true, CancellationToken cancellationToken = default)
-        => ValueTask.FromResult(new List<RadikoStation>());
-
-    public ValueTask UpsertRadikoStationsAsync(IEnumerable<RadikoStation> stations, CancellationToken cancellationToken = default)
-        => ValueTask.CompletedTask;
-
-    public ValueTask<bool> HasAnyRadiruStationAsync(CancellationToken cancellationToken = default)
-        => ValueTask.FromResult(_radiruAreaServices.Count > 0);
-
-    public ValueTask<string?> GetRadiruHlsUrlByAreaAndServiceAsync(string areaId, string serviceId, CancellationToken cancellationToken = default)
-    {
-        var key = $"{areaId}:{serviceId}";
-        if (_radiruAreaServices.TryGetValue(key, out var service))
-        {
-            return ValueTask.FromResult<string?>(service.HlsUrl);
-        }
-
-        return ValueTask.FromResult<string?>(null);
-    }
-
-    public ValueTask<List<RadiruStationEntry>> GetRadiruStationsFromAreaServicesAsync(CancellationToken cancellationToken = default)
-    {
-        var entries = _radiruAreaServices.Values
-            .Where(x => x.IsActive)
-            .Select(x => new RadiruStationEntry
-            {
-                AreaId = x.AreaId,
-                AreaName = _radiruAreas.TryGetValue(x.AreaId, out var area) ? area.AreaJpName : x.AreaId,
-                StationId = x.ServiceId,
-                StationName = x.ServiceName
-            })
-            .ToList();
-
-        return ValueTask.FromResult(entries);
-    }
-
-    public ValueTask UpsertRadiruAreasAndServicesAsync(
-        IEnumerable<NhkRadiruArea> areas,
-        IEnumerable<NhkRadiruAreaService> services,
-        CancellationToken cancellationToken = default)
-    {
-        var areaList = areas.ToList();
-        foreach (var area in areaList)
-        {
-            _radiruAreas[area.AreaId] = area;
-        }
-
-        var targetAreaIds = areaList.Select(x => x.AreaId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var key in _radiruAreaServices.Keys.Where(key => targetAreaIds.Contains(key.Split(':')[0])).ToList())
-        {
-            _radiruAreaServices.Remove(key);
-        }
-
-        foreach (var service in services)
-        {
-            _radiruAreaServices[$"{service.AreaId}:{service.ServiceId}"] = service;
-        }
-
-        return ValueTask.CompletedTask;
-    }
-
-    public ValueTask<List<(string AreaId, string ServiceId)>> GetActiveRadiruAreaServiceKeysAsync(CancellationToken cancellationToken = default)
-        => ValueTask.FromResult(
-            _radiruAreaServices.Values
-                .Where(x => x.IsActive)
-                .Select(x => (x.AreaId, x.ServiceId))
-                .ToList());
-
-    public ValueTask<NhkRadiruArea?> GetRadiruAreaByAreaIdAsync(string areaId, CancellationToken cancellationToken = default)
-    {
-        _radiruAreas.TryGetValue(areaId, out var area);
-        return ValueTask.FromResult(area);
-    }
-}
 file sealed class CanaryStatus
 {
     public required string Result { get; init; }
