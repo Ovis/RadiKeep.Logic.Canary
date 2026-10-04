@@ -3,6 +3,8 @@ obj/
 artifacts/
 results/
 logs/
+state/
+__pycache__/
 *.user
 *.suo
 

@@ -43,11 +43,15 @@ RadiCorder.Logic.Canary/
       Recording/             # 対象番組選択・短時間録音用の番組データ
       Reporting/             # status・番組表JSON・ffmpegログ
       Models/                # 結果・検証情報
+      State/                 # 同期結果の比較・専用SQLiteスナップショット
   tests/
     Canary.Runner.Tests/     # 外部通信を使わない回帰検証
   docs/
     design.md
     spec.md
+    persistent-state.md
+  scripts/
+    canary_state.py           # 状態Orphan Branchとの受け渡し
   .github/workflows/
     canary.yml
 ```
@@ -55,6 +59,8 @@ RadiCorder.Logic.Canary/
 ## 5. チェック対象
 
 - C000: ffmpeg実行可否
+- C020: 空DBからの局定義・番組表同期
+- C021: 前回の正常DBからの局定義・番組表更新
 - C006: radiko全国局定義取得（必須項目スキーマ）
 - C001: radiko 1日分番組表取得（必須項目スキーマ）
 - C002: らじる 1日分番組表取得（必須項目スキーマ）
@@ -70,7 +76,7 @@ RadiCorder.Logic.Canary/
 
 ## 6. 判定モデル
 
-- 各チェックは `PASS / WARN / FAIL`
+- 各チェックは `PASS / WARN / FAIL`。C021のみ、初回またはC020失敗時に明示的な `SKIP` を使う
 - `WARN` は既存の共通判定で通信障害（timeout / DNS / 接続失敗など）と判断する場合に使用する。`HttpRequestException` に変換されたHTTP非成功応答も含む
 - 本体のログアウトAPIは通信例外も `false` に変換するため、C011のログアウト失敗は原因を区別できず `FAIL` とする
 - 全体結果:
@@ -163,6 +169,8 @@ RadiCorder.Logic.Canary/
 HTTPサーバーは `127.0.0.1` の空きポートで配信プロキシだけを公開し、開始後にURLを本体の `ILocalApplicationUrlService` へ渡す。
 
 DB・一時ファイル・ffmpeg元ログはOSの一時ディレクトリ配下に実行ごとのフォルダを作成し、本体のDBと分離する。
+局定義・番組表の同期用DBは資格情報と配信ホストを使わず、空DBと前回DBのコピーで本体の処理を実行する。
+保持するスナップショットと状態ブランチの仕様は [persistent-state.md](persistent-state.md) に記載する。
 終了時はHTTPホストを停止し、DIスコープ・ホストを破棄してから、その実行専用フォルダを削除する。
 チェックの成果物として指定された録音ファイル・ログ・statusは別途保持し、既存CIが録音ファイルをアップロード前に削除する。
 
@@ -185,5 +193,6 @@ HTTPタイムアウトは従来のRunner独自設定ではなく、本体の共�
 - radikoの実認証処理を固定HTTP応答で通し、専用セッション・録音用キャッシュ維持・ログアウト失敗・成果物の資格情報秘匿を確認する。実サービス側のセッションへの影響はこの回帰検証では確認できない。
 
 これらの成功は、実radiko・実らじるの取得や認証・音声取得が成功した証拠ではない。
-最終的な確認には、GitHub Actionsの既存Tailscale経路でCanaryを実行し、10チェックの結果とログを確認する。
+最終的な確認には、GitHub Actionsの既存Tailscale経路でCanaryを実行し、12チェックの結果とログを確認する。
+初回のC021はSKIPとなるため、基準DB保存後の次回実行で増分確認を行う。状態保存失敗時にはC022/C023の診断結果も追加する。
 実サービスの確認処理をスキップしたり、固定応答でPASSに置き換えたりする機能はCLIに追加しない。

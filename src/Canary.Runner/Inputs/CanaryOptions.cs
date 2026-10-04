@@ -15,6 +15,8 @@ internal sealed class CanaryOptions
     internal required string RadikoPassword { get; init; }
     internal int RealtimeRecordSeconds { get; init; }
     internal int TimefreeRecordSeconds { get; init; }
+    internal string StateInputDirectory { get; init; } = "state/input";
+    internal string StateOutputDirectory { get; init; } = "state/output";
 
     internal static CanaryOptions Parse(string[] args)
     {
@@ -24,6 +26,8 @@ internal sealed class CanaryOptions
             StatusPath = GetArg(map, "status-json", "results/status.json"),
             LogDirectory = GetArg(map, "log-dir", "logs"),
             RecordOutputDirectory = GetArg(map, "record-output-dir", "artifacts/recordings"),
+            StateInputDirectory = GetArg(map, "state-input-dir", "state/input"),
+            StateOutputDirectory = GetArg(map, "state-output-dir", "state/output"),
             RadikoStationId = GetArg(map, "radiko-station-id", "TBS"),
             RadiruAreaId = GetArg(map, "radiru-area-id", "JP13"),
             RadiruStationId = GetArg(map, "radiru-station-id", "r1"),

@@ -28,6 +28,8 @@ internal static class CanaryExecution
             var ffmpegCheck = await FfmpegCheck.CheckFfmpegAsync(Path.Combine(options.LogDirectory, "C000_FFMPEG.log"));
             checks.Add(ffmpegCheck);
 
+            checks.AddRange(await DatabaseSyncChecks.RunAsync(options));
+
             var todayJst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, CanaryInputs.ResolveJapanTimeZone()).Date;
             await using var logicContext = await LogicContext.CreateAsync(
                 options.RadikoUserId, options.RadikoPassword,
