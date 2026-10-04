@@ -35,10 +35,8 @@ internal static class ProgramSchemaValidator
                 requiredIssues.Add(new ProgramSchemaIssue(idForLog, "StationId", "missing"));
             }
 
-            if (string.IsNullOrWhiteSpace(p.Title))
-            {
-                requiredIssues.Add(new ProgramSchemaIssue(idForLog, "Title", "missing"));
-            }
+            // radikoの番組名は未確定の空欄を許容し、ログで欠落を確認する。
+            CountOptionalIfMissing(optionalMissing, "Title", p.Title);
 
             if (p.StartTime == default)
             {

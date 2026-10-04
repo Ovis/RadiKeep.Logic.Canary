@@ -102,7 +102,7 @@ public class ProxyTests
     }
 
     private static Task<LogicContext> CreateContext(FixtureHandler upstream) => LogicContext.CreateAsync("", "", services =>
-        services.AddHttpClient(HttpClientNames.Radiko).ConfigurePrimaryHttpMessageHandler(() => upstream));
+        services.AddHttpClient(HttpClientNames.RadikoStreaming).ConfigurePrimaryHttpMessageHandler(() => upstream));
 
     private static HttpClient CreateClient(LogicContext context) => new()
     {

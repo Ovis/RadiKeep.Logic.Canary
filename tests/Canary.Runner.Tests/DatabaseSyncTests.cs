@@ -74,6 +74,61 @@ public class DatabaseSyncTests
         Assert.That(changes, Does.Contain("IsActive").And.Contain("Title"));
     }
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task 推定終了時刻から確定時刻への訂正を同じ番組に反映し更新漏れを検出する(bool loseCorrection)
+    {
+        await Bootstrap(new FixtureHandler(true, fault: "zero"));
+        var originalHash = await CanaryStateStore.ComputeHashAsync(Path.Combine(Options.StateInputDirectory, "canary.db"));
+        var results = await Run(new FixtureHandler(true, fault: "corrected"), loseCorrection
+            ? services => services.AddDbContext<RadioDbContext>(options => options.AddInterceptors(new LostUpdateInterceptor("end")))
+            : null);
+        Assert.That(results.Single(result => result.CheckId == "C020_INITIAL_DATABASE_SYNC").Result, Is.EqualTo("PASS"));
+        var incremental = results.Single(result => result.CheckId == "C021_INCREMENTAL_DATABASE_SYNC");
+        Assert.That(incremental.Result, Is.EqualTo(loseCorrection ? "FAIL" : "PASS"));
+        Assert.That(await CanaryStateStore.ComputeHashAsync(Path.Combine(Options.StateInputDirectory, "canary.db")), Is.EqualTo(originalHash));
+        if (loseCorrection)
+        {
+            Assert.That(incremental.ErrorCode, Is.EqualTo("E-C021-MISMATCH"));
+            Assert.That(File.Exists(Path.Combine(Options.StateOutputDirectory, "canary.db")), Is.False);
+            Assert.That(await File.ReadAllTextAsync(Path.Combine(Options.LogDirectory, "C021_INCREMENTAL_DATABASE_SYNC_mismatches.json")), Does.Contain("EndTime"));
+        }
+        else
+        {
+            var path = await CanaryStateStore.ReadBaselineAsync(Options.StateOutputDirectory, StateProfile.From(Options));
+            await using var context = await LogicContext.CreateAsync("", "", databaseSnapshotPath: path, startProxy: false);
+            Assert.That(await context.DbContext.RadikoPrograms.CountAsync(), Is.EqualTo(2));
+            var program = await context.DbContext.RadikoPrograms.SingleAsync(p => p.ProgramId == "TOKYO_2026100409000020261004090000");
+            Assert.That(program.EndTime, Is.EqualTo(DateTimeOffset.Parse("2026-10-04T09:30:00+09:00")));
+            UseOutputAsBaseline();
+            Assert.That((await Run(new FixtureHandler(true, fault: "corrected"))).All(result => result.Result == "PASS"), Is.True);
+        }
+    }
+
+    [Test]
+    public async Task 空欄の番組名を登録し次の取得で名前を更新できる()
+    {
+        await Bootstrap(new FixtureHandler(false, fault: "blanktitle"));
+        var path = await CanaryStateStore.ReadBaselineAsync(Options.StateInputDirectory, StateProfile.From(Options));
+        await using (var context = await LogicContext.CreateAsync("", "", databaseSnapshotPath: path, startProxy: false))
+            Assert.That((await context.DbContext.RadikoPrograms.SingleAsync()).Title, Is.Empty);
+        Assert.That((await Run(new FixtureHandler(true))).All(result => result.Result == "PASS"), Is.True);
+    }
+
+    [Test]
+    public async Task 日時逆転した番組をスキップして既存データを保持し他の番組は取り込む()
+    {
+        await Bootstrap();
+        Assert.That((await Run(new FixtureHandler(true, fault: "reverse"))).All(result => result.Result == "PASS"), Is.True);
+        var path = await CanaryStateStore.ReadBaselineAsync(Options.StateOutputDirectory, StateProfile.From(Options));
+        await using var context = await LogicContext.CreateAsync("", "", databaseSnapshotPath: path, startProxy: false);
+        Assert.That(await context.DbContext.RadikoPrograms.CountAsync(), Is.EqualTo(2));
+        Assert.That((await context.DbContext.RadikoPrograms.SingleAsync(p => p.StartTime == DateTimeOffset.Parse("2026-10-04T09:00:00+09:00").ToUniversalTime())).Title,
+            Is.EqualTo("initial program"));
+        Assert.That((await context.DbContext.RadikoPrograms.SingleAsync(p => p.StartTime == DateTimeOffset.Parse("2026-10-04T10:00:00+09:00").ToUniversalTime())).Title,
+            Is.EqualTo("updated program"));
+    }
+
     [Test]
     public async Task 同じ番組表の再取得で重複せず保存結果が一致する()
     {
@@ -133,14 +188,29 @@ public class DatabaseSyncTests
         Assert.That(File.Exists(Path.Combine(Options.StateOutputDirectory, "canary.db")), Is.False);
     }
 
-    [Test]
-    public async Task らじるの消えたエリアにサービスが残存する現行の本体動作を検出する()
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task らじるの消えたエリアの無効化と無効化漏れを検証する(bool loseDeactivation)
     {
         await Bootstrap(new FixtureHandler(false, extraArea: true));
-        var results = await Run(new FixtureHandler(false));
-        Assert.That(results.Single(result => result.CheckId == "C021_INCREMENTAL_DATABASE_SYNC").ErrorCode, Is.EqualTo("E-C021-MISMATCH"));
+        var results = await Run(new FixtureHandler(false), loseDeactivation
+            ? services => services.AddDbContext<RadioDbContext>(options => options.AddInterceptors(new LostUpdateInterceptor("radiru-service")))
+            : null);
+        var incremental = results.Single(result => result.CheckId == "C021_INCREMENTAL_DATABASE_SYNC");
+        Assert.That(incremental.Result, Is.EqualTo(loseDeactivation ? "FAIL" : "PASS"));
         var mismatches = await File.ReadAllTextAsync(Path.Combine(Options.LogDirectory, "C021_INCREMENTAL_DATABASE_SYNC_mismatches.json"));
-        Assert.That(mismatches, Does.Contain("270:r1").And.Contain("unexpected"));
+        if (loseDeactivation)
+        {
+            Assert.That(incremental.ErrorCode, Is.EqualTo("E-C021-MISMATCH"));
+            Assert.That(mismatches, Does.Contain("270:r1").And.Contain("unexpected"));
+            Assert.That(File.Exists(Path.Combine(Options.StateOutputDirectory, "canary.db")), Is.False);
+        }
+        else
+        {
+            var path = await CanaryStateStore.ReadBaselineAsync(Options.StateOutputDirectory, StateProfile.From(Options));
+            await using var context = await LogicContext.CreateAsync("", "", databaseSnapshotPath: path, startProxy: false);
+            Assert.That((await context.DbContext.NhkRadiruAreaServices.SingleAsync(s => s.AreaId == "270")).IsActive, Is.False);
+        }
     }
 
     [TestCase("empty")]
@@ -149,7 +219,7 @@ public class DatabaseSyncTests
     public async Task 番組表の空応答や重複やHTTP失敗で初期同期の成功を偽装しない(string fault)
     {
         var results = await Run(new FixtureHandler(false, fault: fault));
-        Assert.That(results.Single(result => result.CheckId == "C020_INITIAL_DATABASE_SYNC").Result, Is.EqualTo("FAIL"));
+        Assert.That(results.Single(result => result.CheckId == "C020_INITIAL_DATABASE_SYNC").Result, Is.EqualTo(fault == "http" ? "WARN" : "FAIL"));
         Assert.That(results.Single(result => result.CheckId == "C021_INCREMENTAL_DATABASE_SYNC").Result, Is.EqualTo("SKIP"));
         Assert.That(File.Exists(Path.Combine(Options.StateOutputDirectory, "canary.db")), Is.False);
     }
@@ -290,6 +360,10 @@ public class DatabaseSyncTests
                 if (fault == "missing" && entry.Entity is RadikoProgram missing && missing.ProgramId.Contains("2026100410000020261004110000")) entry.State = EntityState.Detached;
                 if (fault == "station" && entry.Entity is RadikoStation station && !station.IsActive) station.IsActive = true;
                 if (fault == "program" && entry.State == EntityState.Modified && entry.Entity is RadikoProgram program) program.Title = "initial program";
+                if (fault == "end" && entry.State == EntityState.Modified && entry.Entity is RadikoProgram corrected)
+                    corrected.EndTime = DateTimeOffset.Parse("2026-10-04T10:00:00+09:00");
+                if (fault == "radiru-service" && entry.Entity is NhkRadiruAreaService service && !service.IsActive)
+                    service.IsActive = true;
             }
             return ValueTask.FromResult(result);
         }
@@ -310,9 +384,11 @@ public class DatabaseSyncTests
             if (uri.AbsolutePath.Contains("/weekly/"))
             {
                 if (fault == "http") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
-                var program = $"<prog ft='20261004090000' to='20261004100000'><title>{title}</title><ts_in_ng>0</ts_in_ng></prog>";
+                var end = fault switch { "zero" => "20261004090000", "corrected" => "20261004093000", "reverse" => "20261003093000", _ => "20261004100000" };
+                if (fault == "blanktitle") title = "";
+                var program = $"<prog ft='20261004090000' to='{end}'><title>{title}</title><ts_in_ng>0</ts_in_ng></prog>";
                 var extra = updated ? $"<prog ft='20261004100000' to='20261004110000'><title>{title}</title><ts_in_ng>0</ts_in_ng></prog>" : "";
-                return Text($"<radiko>{(fault == "empty" ? "" : program + (fault == "duplicate" ? program : extra))}</radiko>", "application/xml");
+                return Text($"<radiko><station id='TOKYO'><progs>{(fault == "empty" ? "" : program + (fault == "duplicate" ? program : extra))}</progs></station></radiko>", "application/xml");
             }
             var date = DateOnly.Parse(Path.GetFileNameWithoutExtension(uri.AbsolutePath));
             var start = new DateTimeOffset(date.ToDateTime(new TimeOnly(9, 0)), TimeSpan.FromHours(9));
