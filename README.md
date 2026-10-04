@@ -13,6 +13,8 @@ RadiCorder が依存する外部サービス変更を検知する Canary 実行�
 ## 現在のチェック
 
 - `C000_FFMPEG`
+- `C020_INITIAL_DATABASE_SYNC`
+- `C021_INCREMENTAL_DATABASE_SYNC`
 - `C006_RADIKO_STATIONS_FETCH`
 - `C001_RADIKO_DAILY_FETCH`
 - `C002_RADIRU_DAILY_FETCH`
@@ -26,6 +28,10 @@ RadiCorder が依存する外部サービス変更を検知する Canary 実行�
 全国局定義は本体のAPIクライアントで取得・解析し、必須項目を確認する。
 ログアウトは全録音チェックの後に専用セッションで行い、録音用の認証キャッシュは使用しない。
 本体のDiscord通知・GitHub更新確認・NTP・ブラウザの外部フォント・番組画像の取得と埋め込みはチェック対象に含めない。
+
+局定義と番組表の同期は、空のDBと前回の正常DBに同じ実サービス応答を反映して比較する。
+前回DBは `canary-state` Orphan Branchで保持する。初回の増分チェックは明示的にSKIPとし、正常な基準DBを作成する。
+詳細・保持対象・リセット方法は [docs/persistent-state.md](docs/persistent-state.md) を参照。
 
 ## 結果コード
 
@@ -60,6 +66,7 @@ git submodule update --init --recursive
 - `radiru_station_id`
 - `realtime_record_seconds`
 - `timefree_record_seconds`
+- `reset_state`（前回DBを使わず、全体PASSの場合だけ保存済みDBを置き換える）
 
 4. ローカル実行（雛形）
 ```powershell
@@ -78,6 +85,7 @@ dotnet run --project src/Canary.Runner/Canary.Runner.csproj -- --status-json res
 
 ```powershell
 dotnet test tests/Canary.Runner.Tests/Canary.Runner.Tests.csproj --configuration Release
+python3 -m unittest discover -s tests/state_storage -v
 ```
 
 この検証は外部サービス・Tailscale・資格情報を使わず、DI構成、専用DB、配信プロキシ、チェックの判定と出力形式を確認する。
