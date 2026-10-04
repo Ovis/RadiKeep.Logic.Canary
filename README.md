@@ -33,6 +33,11 @@ RadiCorder が依存する外部サービス変更を検知する Canary 実行�
 前回DBは `canary-state` Orphan Branchで保持する。初回の増分チェックは明示的にSKIPとし、正常な基準DBを作成する。
 詳細・保持対象・リセット方法は [docs/persistent-state.md](docs/persistent-state.md) を参照。
 
+radikoの番組名の空欄はログへ記録し、取り込み失敗にはしない。長さ0秒の推定や日時逆転のスキップは本体の処理を使う。
+増分確認では同じ局・開始日時の既存番組IDを維持し、最新の終了日時や番組名が反映されたかを比較する。
+終了日時の訂正漏れを故意に発生させるテストでも、不一致を検出して基準DBを更新しないことを確認する。
+この対応は [RadiCorder PR #46](https://github.com/Ovis/RadiCorder/pull/46) と併せて導入する。実サービスのCanaryは本体 `main` を使うため、本体を先にマージする。
+
 ## 結果コード
 
 - `0`: PASS

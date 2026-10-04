@@ -75,9 +75,10 @@ public class ContractTests
         ]);
         Assert.That(result.RequiredIssues.Select(issue => (issue.Field, issue.Reason)), Is.EqualTo(new[]
         {
-            ("ProgramId", "duplicate"), ("Title", "missing"), ("Duration", "end_before_or_equal_start")
+            ("ProgramId", "duplicate"), ("Duration", "end_before_or_equal_start")
         }));
         Assert.That(result.OptionalMissingCounts["Performer"], Is.EqualTo(2));
+        Assert.That(result.OptionalMissingCounts["Title"], Is.EqualTo(1));
     }
 
     [Test]

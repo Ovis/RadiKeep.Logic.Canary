@@ -49,7 +49,26 @@ internal sealed class SyncDatabaseSnapshot
                     merged[key] = JsonSerializer.Serialize(fields);
                 }
             }
-            foreach (var row in rows) merged[row.Key] = row.Value;
+            var radikoKeysBySlot = table == "RadikoPrograms"
+                ? merged.OrderBy(row => row.Key, StringComparer.Ordinal)
+                    .GroupBy(row => ReadRadikoSlot(row.Value)).ToDictionary(group => group.Key, group => group.First().Key)
+                : null;
+            foreach (var row in rows)
+            {
+                var key = row.Key;
+                if (radikoKeysBySlot != null && !merged.ContainsKey(key) &&
+                    radikoKeysBySlot.TryGetValue(ReadRadikoSlot(row.Value), out var existingKey))
+                    key = existingKey;
+
+                if (key == row.Key) merged[key] = row.Value;
+                else
+                {
+                    // 終了日時の訂正は同じ放送枠の更新とし、前回DBの参照IDを維持する。
+                    var fields = JsonSerializer.Deserialize<SortedDictionary<string, JsonElement>>(row.Value)!;
+                    fields["ProgramId"] = JsonSerializer.SerializeToElement(key);
+                    merged[key] = JsonSerializer.Serialize(fields);
+                }
+            }
             if (table is "RadikoPrograms" or "NhkRadiruPrograms")
             {
                 foreach (var key in merged.Keys.ToList())
@@ -62,6 +81,13 @@ internal sealed class SyncDatabaseSnapshot
             expected.Tables[table] = merged;
         }
         return expected;
+    }
+
+    private static (string StationId, DateTimeOffset Start) ReadRadikoSlot(string value)
+    {
+        using var document = JsonDocument.Parse(value);
+        return (document.RootElement.GetProperty("StationId").GetString()!,
+            document.RootElement.GetProperty("StartTime").GetDateTimeOffset());
     }
 
     internal IReadOnlyList<SyncDifference> DifferencesFrom(SyncDatabaseSnapshot actual)
