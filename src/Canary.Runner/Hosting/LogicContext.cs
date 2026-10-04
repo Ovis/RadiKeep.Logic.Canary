@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Canary.Runner.State;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
@@ -52,11 +53,27 @@ internal sealed class LogicContext(WebApplication application, AsyncServiceScope
         string radikoPassword,
         Action<IServiceCollection>? configureServices = null,
         string radiruAreaId = "JP13",
-        string radiruStationId = "r1")
+        string radiruStationId = "r1",
+        string? databaseSnapshotPath = null,
+        bool startProxy = true)
     {
-        // 実行ごとにDBを分け、本体のDBや以前のCanary結果を参照しない。
+        // 実行ごとにDBを分け、保持DBもコピー側だけで更新する。
         var workRoot = Path.Combine(Path.GetTempPath(), "radicorder-canary", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workRoot);
+        var databasePath = Path.Combine(workRoot, "canary.db");
+        try
+        {
+            if (databaseSnapshotPath is not null)
+            {
+                // 保存元には書き込まず、SQLiteのバックアップAPIで実行専用DBへ復元する。
+                CanaryStateStore.CopyDatabase(databaseSnapshotPath, databasePath);
+            }
+        }
+        catch
+        {
+            DeleteWorkDirectory(workRoot);
+            throw;
+        }
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { Args = [] });
         builder.Host.UseDefaultServiceProvider(options =>
         {
@@ -71,7 +88,7 @@ internal sealed class LogicContext(WebApplication application, AsyncServiceScope
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Logging.ClearProviders();
         builder.Services.AddDbContext<RadioDbContext>(options =>
-            options.UseSqlite($"Data Source={Path.Combine(workRoot, "canary.db")};Pooling=False"));
+            options.UseSqlite($"Data Source={databasePath};Pooling=False"));
         builder.Services.Configure<StorageOptions>(options =>
         {
             options.RecordFileSaveFolder = Path.Combine(workRoot, "record");
@@ -110,6 +127,15 @@ internal sealed class LogicContext(WebApplication application, AsyncServiceScope
             scope = application.Services.CreateAsyncScope();
             scopeCreated = true;
             var context = new LogicContext(application, scope, workRoot);
+            if (databaseSnapshotPath is not null)
+            {
+                var unknown = (await context.DbContext.Database.GetAppliedMigrationsAsync())
+                    .Except(context.DbContext.Database.GetMigrations()).ToList();
+                if (unknown.Count > 0)
+                {
+                    throw new InvalidDataException("保存DBに現在の本体が認識しないmigrationが含まれています。");
+                }
+            }
             await context.DbContext.Database.MigrateAsync();
             if (!string.IsNullOrWhiteSpace(radikoUserId) && !string.IsNullOrWhiteSpace(radikoPassword))
             {
@@ -117,11 +143,14 @@ internal sealed class LogicContext(WebApplication application, AsyncServiceScope
                 await context.Config.UpdateRadikoCredentialsAsync(radikoUserId, radikoPassword);
             }
 
-            application.MapGroup("/api/programs").MapRadikoStreamingEndpoints();
-            await application.StartAsync();
-            var addresses = application.Services.GetRequiredService<IServer>()
-                .Features.Get<IServerAddressesFeature>()?.Addresses ?? application.Urls;
-            context.Services.GetRequiredService<ILocalApplicationUrlService>().SetCandidateUrls(addresses);
+            if (startProxy)
+            {
+                application.MapGroup("/api/programs").MapRadikoStreamingEndpoints();
+                await application.StartAsync();
+                var addresses = application.Services.GetRequiredService<IServer>()
+                    .Features.Get<IServerAddressesFeature>()?.Addresses ?? application.Urls;
+                context.Services.GetRequiredService<ILocalApplicationUrlService>().SetCandidateUrls(addresses);
+            }
             return context;
         }
         catch
