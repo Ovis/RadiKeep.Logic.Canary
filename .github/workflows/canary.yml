@@ -26,6 +26,11 @@ on:
         description: "Timefree record seconds"
         required: false
         default: "30"
+      reset_state:
+        description: "前回DBを使わず、Canary全体がPASSなら保持データを再作成する"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -33,6 +38,12 @@ permissions:
 
 jobs:
   canary:
+    permissions:
+      contents: write
+      id-token: write
+    concurrency:
+      group: canary-state
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -98,6 +109,14 @@ jobs:
         run: |
           mkdir -p results logs artifacts/recordings
 
+      - name: Restore previous station and program database
+        env:
+          RESET_STATE: ${{ inputs.reset_state || false }}
+        run: |
+          args=()
+          if [ "$RESET_STATE" = "true" ]; then args+=(--reset); fi
+          python3 scripts/canary_state.py restore "${args[@]}"
+
       - name: Validate ffmpeg
         run: |
           set -euo pipefail
@@ -118,11 +137,17 @@ jobs:
             --realtime-record-seconds "${REALTIME_RECORD_SECONDS}" \
             --timefree-record-seconds "${TIMEFREE_RECORD_SECONDS}" \
             --status-json "results/status.json" \
+            --state-input-dir "state/input" \
+            --state-output-dir "state/output" \
             --log-dir "logs" \
             --record-output-dir "artifacts/recordings"
           exit_code=$?
           echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
           exit 0
+
+      - name: Publish successful station and program database
+        if: steps.run_canary.outputs.exit_code == '0' && github.ref == 'refs/heads/main'
+        run: python3 scripts/canary_state.py publish
 
       - name: Ensure status.json exists
         if: always()
@@ -145,7 +170,7 @@ jobs:
           rm -rf artifacts/recordings/*
 
       - name: Upload artifacts
-        if: always() && (github.event_name == 'workflow_dispatch' || steps.run_canary.outputs.exit_code != '0')
+        if: always() && (github.event_name == 'workflow_dispatch' || steps.run_canary.outputs.exit_code != '0' || failure())
         uses: actions/upload-artifact@v4
         with:
           name: canary-${{ github.run_id }}
@@ -156,7 +181,7 @@ jobs:
           retention-days: 3
 
       - name: Notify Discord on failure or warning
-        if: always() && steps.run_canary.outputs.exit_code != '0' && env.DISCORD_WEBHOOK_URL != ''
+        if: always() && (steps.run_canary.outputs.exit_code != '0' || failure()) && env.DISCORD_WEBHOOK_URL != ''
         shell: bash
         run: |
           set -euo pipefail

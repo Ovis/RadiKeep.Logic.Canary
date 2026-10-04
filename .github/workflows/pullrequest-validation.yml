@@ -25,3 +25,6 @@ jobs:
 
       - name: Verify runner without external services
         run: dotnet test tests/Canary.Runner.Tests/Canary.Runner.Tests.csproj --configuration Release
+
+      - name: Verify state storage without external services
+        run: python3 -m unittest discover -s tests/state_storage -v
