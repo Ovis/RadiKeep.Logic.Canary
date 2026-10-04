@@ -1,0 +1,25 @@
+{
+  "Result": "FAIL",
+  "Message": "One or more bootstrap checks failed.",
+  "TimestampJst": "2026-10-03T09:00:00.0000000\u002B09:00",
+  "Checks": [
+    {
+      "CheckId": "C001_RADIKO_DAILY_FETCH",
+      "Result": "PASS",
+      "Message": "Fetched 1 programs.",
+      "ErrorCode": ""
+    },
+    {
+      "CheckId": "C004_RADIKO_TIMEFREE_RECORD",
+      "Result": "WARN",
+      "Message": "timeout",
+      "ErrorCode": "E-C004-RECORD-EXEC"
+    },
+    {
+      "CheckId": "C010_RADIKO_LOGIN",
+      "Result": "FAIL",
+      "Message": "RADIKO credentials are missing.",
+      "ErrorCode": "E-C010-NO-CREDENTIALS"
+    }
+  ]
+}

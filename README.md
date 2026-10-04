@@ -13,13 +13,19 @@ RadiCorder が依存する外部サービス変更を検知する Canary 実行�
 ## 現在のチェック
 
 - `C000_FFMPEG`
+- `C006_RADIKO_STATIONS_FETCH`
 - `C001_RADIKO_DAILY_FETCH`
 - `C002_RADIRU_DAILY_FETCH`
 - `C010_RADIKO_LOGIN`
 - `C003_RADIKO_REALTIME_RECORD`
-- `C003_RADIRU_REALTIME_RECORD`
 - `C004_RADIKO_TIMEFREE_RECORD`
+- `C003_RADIRU_REALTIME_RECORD`
 - `C005_RADIRU_ONDEMAND_RECORD`
+- `C011_RADIKO_LOGOUT`
+
+全国局定義は本体のAPIクライアントで取得・解析し、必須項目を確認する。
+ログアウトは全録音チェックの後に専用セッションで行い、録音用の認証キャッシュは使用しない。
+本体のDiscord通知・GitHub更新確認・NTP・ブラウザの外部フォント・番組画像の取得と埋め込みはチェック対象に含めない。
 
 ## 結果コード
 
@@ -67,3 +73,15 @@ dotnet run --project src/Canary.Runner/Canary.Runner.csproj -- --status-json res
 - 保持期間: 3日
 - アップロード対象: `results/status.json`, `logs/**`
 - 録音ファイルは著作権配慮のためアップロード前に削除
+
+## 開発時の回帰検証
+
+```powershell
+dotnet test tests/Canary.Runner.Tests/Canary.Runner.Tests.csproj --configuration Release
+```
+
+この検証は外部サービス・Tailscale・資格情報を使わず、DI構成、専用DB、配信プロキシ、チェックの判定と出力形式を確認する。
+GitHub ActionsのPR検証でも固定コミットのsubmoduleを使って実行する。
+実サービスへの取得・認証・録音確認は、従来どおり `Canary Check` ワークフローが日本のネットワーク経由で実施する。
+
+Canaryの実行コードの構成と本体の利用範囲は [docs/design.md](docs/design.md) を参照。

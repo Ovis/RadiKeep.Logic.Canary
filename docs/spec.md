@@ -16,8 +16,11 @@
 ### 2.2 WARN 判定ルール
 
 - 一時的通信障害（タイムアウト、DNS、接続失敗等）は `WARN` とする。
+- 共通判定では `HttpRequestException` も通信障害に含める。HTTP非成功応答がこの例外へ変換された場合も `WARN` となる。
 - それ以外の失敗は `FAIL` とする。
 - 現行実装ではチェック単位の自動再試行は行わない。
+- 本体のHTTP共通処理にある再試行は利用する。
+- C011のログアウト呼び出しは本体が通信例外も `false` に変換するため、失敗原因を区別せず `FAIL` とする。
 
 ### 2.3 成果物
 
@@ -27,6 +30,8 @@
   - チェック単位の詳細ログ
 - `logs/<check-id>_programs.json`
   - C001/C002 の取得番組表データ
+- `logs/<check-id>_stations.json`
+  - C006 の取得全国局定義データ
 - Artifact アップロード対象
   - `results/status.json`
   - `logs/**`
@@ -185,6 +190,52 @@
   - `E-C010-NO-CREDENTIALS`
   - `E-C010-LOGIN`
   - `E-C010-EXCEPTION`
+
+### 4.8 C006: radiko 全国局定義取得
+
+- ID: `C006_RADIKO_STATIONS_FETCH`
+- 目的: 全国局定義APIの取得・解析と必須項目の互換性を確認する
+- 手順:
+  - 番組表取得の前に、本体の `IRadikoApiClient.GetRadikoStationsAsync()` で `http://radiko.jp/v3/station/region/full.xml` を取得・解析する
+  - 本体が解析した全局のデータをJSONに保存する
+- 判定:
+  - 局件数 > 0
+  - 各局の `StationId`, `StationName`, `RegionId`, `RegionName`, `Area` が空白ではない
+  - ロゴやWebサイトURLの欠落は失敗としない
+  - 固定の局数・地域数は要求せず、局IDの重複だけでは失敗としない（本体のrepositoryは重複を集約する）
+- 局件数・局IDのユニーク数・地域数・必須項目の欠落をログに記録する
+- 本チェックではDBへの保存は行わない
+- 失敗コード:
+  - `E-C006-EMPTY`
+  - `E-C006-SCHEMA`
+  - `E-C006-FETCH`（取得・解析例外。共通の通信障害判定に該当する場合は `WARN`）
+
+本体がHTTP非成功応答を `HttpRequestException` に変換した場合も、既存の共通判定に従って `WARN` となる。
+
+### 4.9 C011: radiko ログアウト検証
+
+- ID: `C011_RADIKO_LOGOUT`
+- 目的: 本体の処理で取得したセッションをログアウトAPIへ送信できるかを確認する
+- 入力: `RADIKO_USER_ID`, `RADIKO_PASSWORD`（実行専用設定から読み戻す）
+- 手順:
+  - 全録音チェックの後に実行する
+  - 本体の `TryLoginWithCredentialsAsync()` で確認専用セッションを取得する。録音用の認証キャッシュは読み書きしない
+  - 本体の `LogoutRadikoAsync()` で専用セッションを `https://radiko.jp/v4/api/member/logout` へ送信する
+- 判定:
+  - 専用ログイン成功かつ本体のログアウト処理が `true` を返した場合に `PASS`
+  - ログアウトの成功条件は本体と同じHTTP成功ステータス。応答本文やログアウト後のセッション無効化は別途確認しない
+  - 資格情報なし・専用ログイン失敗は `FAIL`
+  - ログアウトの `false` は通信例外を含めて `FAIL`（本体のAPIから原因を区別できない）
+  - 専用ログインなどの伝播する例外は共通の通信障害判定に従う
+- ログには成否と例外の型のみを記録し、資格情報・セッションは記録しない
+- 失敗コード:
+  - `E-C011-NO-CREDENTIALS`
+  - `E-C011-LOGIN`
+  - `E-C011-LOGOUT`
+  - `E-C011-EXCEPTION`
+
+本体のDiscord通知・GitHub更新確認・NTP・ブラウザの外部フォント・番組画像取得と埋め込みは本仕様の確認対象に含めない。
+Canary自身の障害通知は既存のまま継続する。
 
 ## 5. 全体終了コード
 
