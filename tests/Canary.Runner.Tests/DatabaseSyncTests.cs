@@ -206,6 +206,37 @@ public class DatabaseSyncTests
         Assert.That(results.Single(result => result.CheckId == "C022_STATE_SNAPSHOT").Result, Is.EqualTo("FAIL"));
     }
 
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task 入出力が同じ場所や末尾区切り文字付きの親子ディレクトリでも前回DBを削除しない(bool nested)
+    {
+        await Bootstrap();
+        var hash = await CanaryStateStore.ComputeHashAsync(Path.Combine(Options.StateInputDirectory, "canary.db"));
+        var options = CanaryOptions.Parse(["--radiko-station-id", "TOKYO", "--radiru-area-id", "130",
+            "--log-dir", Options.LogDirectory, "--state-input-dir", Options.StateInputDirectory + Path.DirectorySeparatorChar,
+            "--state-output-dir", nested ? Path.Combine(Options.StateInputDirectory, "child") : Options.StateInputDirectory]);
+        var results = await Run(new FixtureHandler(false), options: options);
+        Assert.That(results.Single(result => result.CheckId == "C021_INCREMENTAL_DATABASE_SYNC").ErrorCode, Is.EqualTo("E-C021-BASELINE"));
+        Assert.That(await CanaryStateStore.ComputeHashAsync(Path.Combine(Options.StateInputDirectory, "canary.db")), Is.EqualTo(hash));
+    }
+
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task 別名のシンボリックリンクでも前回DBやその子を出力先にしない(bool nested)
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Ignore("Linuxでディレクトリのシンボリックリンクを検証する。");
+        await Bootstrap();
+        var hash = await CanaryStateStore.ComputeHashAsync(Path.Combine(Options.StateInputDirectory, "canary.db"));
+        var alias = Path.Combine(root, "alias");
+        Directory.CreateSymbolicLink(alias, Options.StateInputDirectory);
+        var options = CanaryOptions.Parse(["--radiko-station-id", "TOKYO", "--radiru-area-id", "130",
+            "--log-dir", Options.LogDirectory, "--state-input-dir", Options.StateInputDirectory,
+            "--state-output-dir", nested ? Path.Combine(alias, "child") : alias]);
+        var results = await Run(new FixtureHandler(false), options: options);
+        Assert.That(results.Single(result => result.CheckId == "C021_INCREMENTAL_DATABASE_SYNC").ErrorCode, Is.EqualTo("E-C021-BASELINE"));
+        Assert.That(await CanaryStateStore.ComputeHashAsync(Path.Combine(Options.StateInputDirectory, "canary.db")), Is.EqualTo(hash));
+    }
+
     [Test]
     public async Task 認証用DBを保存対象として受け付けない()
     {
@@ -242,8 +273,8 @@ public class DatabaseSyncTests
             File.Copy(file, Path.Combine(Options.StateInputDirectory, Path.GetFileName(file)), overwrite: true);
     }
 
-    private Task<IReadOnlyList<CheckResult>> Run(FixtureHandler handler, Action<IServiceCollection>? configure = null) =>
-        DatabaseSyncChecks.RunAsync(Options, services =>
+    private Task<IReadOnlyList<CheckResult>> Run(FixtureHandler handler, Action<IServiceCollection>? configure = null, CanaryOptions? options = null) =>
+        DatabaseSyncChecks.RunAsync(options ?? Options, services =>
         {
             services.AddHttpClient(HttpClientNames.Radiko).ConfigurePrimaryHttpMessageHandler(() => handler);
             services.AddHttpClient(HttpClientNames.Radiru).ConfigurePrimaryHttpMessageHandler(() => handler);

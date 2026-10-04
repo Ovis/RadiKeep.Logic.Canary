@@ -35,10 +35,13 @@ internal static class DatabaseSyncChecks
 
         try
         {
-            var input = Path.GetFullPath(options.StateInputDirectory);
-            var output = Path.GetFullPath(options.StateOutputDirectory);
-            if (input == output || input.StartsWith(output + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
-                output.StartsWith(input + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            var input = ResolveDirectory(options.StateInputDirectory);
+            var output = ResolveDirectory(options.StateOutputDirectory);
+            var inputPrefix = Path.EndsInDirectorySeparator(input) ? input : input + Path.DirectorySeparatorChar;
+            var outputPrefix = Path.EndsInDirectorySeparator(output) ? output : output + Path.DirectorySeparatorChar;
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (input.Equals(output, comparison) || input.StartsWith(outputPrefix, comparison) ||
+                output.StartsWith(inputPrefix, comparison))
                 throw new InvalidDataException("状態の入力と出力には別のディレクトリを指定してください。");
             ClearCandidate(options.StateOutputDirectory);
             baseline = await CanaryStateStore.ReadBaselineAsync(options.StateInputDirectory, profile);
@@ -160,5 +163,15 @@ internal static class DatabaseSyncChecks
         File.Delete(Path.Combine(directory, CanaryStateStore.DatabaseFileName));
         File.Delete(Path.Combine(directory, CanaryStateStore.ManifestFileName));
         File.Delete(Path.Combine(directory, CanaryStateStore.DatabaseFileName + ".tmp"));
+    }
+
+    private static string ResolveDirectory(string path)
+    {
+        var directory = new DirectoryInfo(Path.GetFullPath(path));
+        if (directory.Parent is { } parent)
+            directory = new DirectoryInfo(Path.Combine(ResolveDirectory(parent.FullName), directory.Name));
+        if (directory.Exists && directory.LinkTarget is not null)
+            directory = (DirectoryInfo)directory.ResolveLinkTarget(returnFinalTarget: true)!;
+        return Path.TrimEndingDirectorySeparator(directory.FullName);
     }
 }
