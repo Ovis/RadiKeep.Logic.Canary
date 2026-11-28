@@ -1,0 +1,12 @@
+{
+  "FormatVersion": 1,
+  "Profile": {
+    "RadikoStationId": "TBS",
+    "RadiruAreaId": "130",
+    "RadiruStationId": "r1"
+  },
+  "DatabaseSha256": "AC0212547A4F01EDA4BE4D26EF4044ABCF33D448720112F14D5676CD3095E9FA",
+  "CapturedAtUtc": "2026-11-28T09:04:41.7894553+00:00",
+  "RadiCorderRevision": "12a3e5084e2d434f5525720b9224e2f89ad2c427",
+  "CanaryRevision": "a66db6bfe6fb7a776cd357b0355f84c696fbce6b"
+}
